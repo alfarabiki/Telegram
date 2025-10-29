@@ -13,14 +13,7 @@ from email.mime.multipart import MIMEMultipart
 from email import encoders
 from email.header import Header
 from telegram import Update, Bot
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
-from telegram.error import TimedOut, Conflict
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from flask import Flask
 import nest_asyncio
 
@@ -39,34 +32,10 @@ if not TELEGRAM_TOKEN or not EMAIL_SENDER or not EMAIL_PASSWORD:
 
 
 # ===============================
-# LOGGING HELPERS
+# LOGGING
 # ===============================
 def log_terminal(tag, message):
-    waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{waktu}] [{tag}] {message}")
-
-
-def log_email_to_csv(subject, to, status):
-    waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open("email_log.csv", "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if f.tell() == 0:
-            writer.writerow(["timestamp", "to", "subject", "status"])
-        writer.writerow([waktu, to, subject, status])
-
-
-def log_message_to_csv(user, text):
-    waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open("message_log.csv", "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if f.tell() == 0:
-            writer.writerow(["timestamp", "user", "username", "message"])
-        writer.writerow([
-            waktu,
-            user.first_name or "User",
-            user.username or "-",
-            text,
-        ])
+    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [{tag}] {message}")
 
 
 # ===============================
@@ -94,33 +63,27 @@ def send_email(subject, body_text, attachments=None):
             server.starttls()
             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
             server.send_message(msg)
-        status = "Terkirim"
         log_terminal("EMAIL", f"Terkirim ke {msg['To']} | Subject: {subject}")
+        return "Terkirim"
     except Exception as e:
-        status = f"Gagal: {e}"
         log_terminal("EMAIL", f"Gagal kirim: {e}")
-
-    log_email_to_csv(subject, msg["To"], status)
-    return status
+        return f"Gagal: {e}"
 
 
 # ===============================
-# WAKTU FORMATTER
+# UTIL
 # ===============================
 def get_waktu_sekarang():
-    hari_list = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
     bulan_list = [
         "Januari", "Februari", "Maret", "April", "Mei", "Juni",
         "Juli", "Agustus", "September", "Oktober", "November", "Desember"
     ]
     now = datetime.now()
-    hari = hari_list[now.weekday()]
-    bulan = bulan_list[now.month - 1]
-    return f"{hari}, {now.day} {bulan} {now.year} • {now.strftime('%H:%M')}"
+    return f"{now.day} {bulan_list[now.month - 1]} {now.year} • {now.strftime('%H:%M')}"
 
 
 # ===============================
-# BUFFER MESSAGE
+# TELEGRAM HANDLERS
 # ===============================
 async def flush_pending_messages(context):
     pending = context.bot_data.get("pending_messages", [])
@@ -134,55 +97,38 @@ async def flush_pending_messages(context):
         attachments.extend(msg["attachments"])
 
     context.bot_data["pending_messages"] = []
-
     subject = f"From Baba & Ibun – {get_waktu_sekarang()}"
-    status = send_email(subject, body, attachments)
-
-    if status == "Terkirim":
-        for f in attachments:
-            try:
-                os.remove(f)
-            except Exception as e:
-                log_terminal("SYSTEM", f"Gagal hapus file {f}: {e}")
-
+    send_email(subject, body, attachments)
     log_terminal("SYSTEM", f"✅ Pesan terkirim ({len(attachments)} lampiran)")
 
 
-# ===============================
-# TELEGRAM HANDLERS
-# ===============================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Halo 👋 Bot ini aktif di cloud dan siap menerima pesan kamu!")
+    await update.message.reply_text("Halo 👋 Bot aktif di cloud dan siap menerima pesan kamu!")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
-    text = update.message.text or update.message.caption or "(tidak ada teks)"
+    text = update.message.text or update.message.caption or "(tanpa teks)"
     attachments = []
 
     os.makedirs("downloads", exist_ok=True)
 
     if update.message.photo:
-        photo = update.message.photo[-1]
-        file = await photo.get_file()
-        path = f"downloads/photo_{photo.file_id}.jpg"
+        file = await update.message.photo[-1].get_file()
+        path = f"downloads/{file.file_id}.jpg"
         await file.download_to_drive(custom_path=path)
         attachments.append(path)
 
     if update.message.document:
-        doc = update.message.document
-        file = await doc.get_file()
-        path = f"downloads/{doc.file_name}"
+        file = await update.message.document.get_file()
+        path = f"downloads/{update.message.document.file_name}"
         await file.download_to_drive(custom_path=path)
         attachments.append(path)
-
-    log_terminal("TELEGRAM", f"Dari {user.first_name or 'User'} | Pesan: {text}")
-    log_message_to_csv(user, text)
 
     context.bot_data.setdefault("pending_messages", []).append({
         "from": f"{user.first_name or 'User'} (@{user.username or '-'})",
         "text": text,
-        "attachments": attachments
+        "attachments": attachments,
     })
 
     if "flush_task" in context.bot_data and context.bot_data["flush_task"]:
@@ -191,7 +137,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.bot_data["flush_task"] = asyncio.create_task(asyncio.sleep(60))
     context.bot_data["flush_task"].add_done_callback(lambda _: asyncio.create_task(flush_pending_messages(context)))
 
-    await update.message.reply_text("✅ Pesan kamu diterima dan akan dikirim ke email dalam 1 menit tanpa aktivitas baru.")
+    await update.message.reply_text("✅ Pesan diterima, akan dikirim ke email dalam 1 menit tanpa pesan baru.")
 
 
 async def send_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -200,52 +146,39 @@ async def send_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ===============================
-# KEEPALIVE SERVER (FLASK)
+# FLASK KEEPALIVE
 # ===============================
 flask_app = Flask("keepalive")
 
 @flask_app.route("/")
 def home():
-    return "Bot is running fine.", 200
+    return "Bot is alive", 200
 
 def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port)
+    flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 
 # ===============================
-# MAIN LOOP (RENDER FRIENDLY)
+# MAIN
 # ===============================
 if __name__ == "__main__":
     nest_asyncio.apply()
     threading.Thread(target=run_flask, daemon=True).start()
 
-    # Reset webhook sebelum polling (agar tidak conflict)
-    async def reset_webhook():
+    async def main():
         bot = Bot(TELEGRAM_TOKEN)
         try:
             await bot.delete_webhook(drop_pending_updates=True)
-            log_terminal("SYSTEM", "🔄 Webhook dan sesi lama dibersihkan.")
+            log_terminal("SYSTEM", "✅ Webhook lama dihapus.")
         except Exception as e:
-            log_terminal("SYSTEM", f"⚠️ Gagal reset webhook: {e}")
+            log_terminal("SYSTEM", f"⚠️ Gagal hapus webhook: {e}")
 
-    asyncio.run(reset_webhook())
+        app = Application.builder().token(TELEGRAM_TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler(["send", "sent"], send_now))
+        app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    while True:
-        try:
-            log_terminal("SYSTEM", "🤖 Bot sedang berjalan di cloud (Polling mode)...")
-            app = Application.builder().token(TELEGRAM_TOKEN).build()
-            app.add_handler(CommandHandler("start", start))
-            app.add_handler(CommandHandler(["send", "sent"], send_now))
-            app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+        log_terminal("SYSTEM", "🤖 Bot aktif di Render (polling mode)...")
+        await app.run_polling(drop_pending_updates=True)
 
-            app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-        except Conflict:
-            log_terminal("SYSTEM", "⚠️ Conflict terdeteksi — menunggu instance lain berhenti...")
-            time.sleep(15)
-        except TimedOut:
-            log_terminal("SYSTEM", "⏱ Timeout, mencoba lagi...")
-            time.sleep(5)
-        except KeyboardInterrupt:
-            log_terminal("SYSTEM", "🛑 Bot dihentikan manual.")
-            break
+    asyncio.run(main())
