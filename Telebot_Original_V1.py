@@ -1,82 +1,179 @@
-#!/usr/bin/env python3
 import os
-import asyncio
 import smtplib
-import csv
-from datetime import datetime
+import asyncio
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email import encoders
-from telegram import Update, Bot
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
-from telegram.error import Conflict, TimedOut
+from telegram import Update
+from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
+from datetime import datetime
+import warnings
+import csv
+import time
+from telegram.error import TimedOut
+from email.header import Header
 
-# ===============================
-# CONFIG
-# ===============================
+# ===== SUPPRESS WARNING =====
+warnings.filterwarnings("ignore", category=UserWarning, module="apscheduler")
+
+# ===== KONFIGURASI ENV =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVERS = os.getenv("EMAIL_RECEIVERS", "abriellarayasha@gmail.com").split(",")
 
 if not TELEGRAM_TOKEN or not EMAIL_SENDER or not EMAIL_PASSWORD:
-    raise EnvironmentError("Missing env vars: TELEGRAM_TOKEN, EMAIL_SENDER, EMAIL_PASSWORD")
+    raise EnvironmentError("⚠️ Missing environment variables! Please set TELEGRAM_TOKEN, EMAIL_SENDER, and EMAIL_PASSWORD.")
 
-# ===============================
-# UTILITIES
-# ===============================
-def log(tag, msg):
-    print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] [{tag}] {msg}")
+# ===== LOGGING DI TERMINAL =====
+def log_terminal(msg_type, message):
+    waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{waktu}] [{msg_type}] {message}")
 
-def send_email(subject, body, attachments=None):
+# ===== SIMPAN LOG EMAIL =====
+def log_email_to_csv(subject, to, status):
+    waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    filename = "email_log.csv"
+    file_exists = os.path.isfile(filename)
+    with open(filename, mode="a", newline="", encoding="utf-8") as csvfile:
+        fieldnames = ["timestamp", "to", "subject", "status"]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow({"timestamp": waktu, "to": to, "subject": subject, "status": status})
+
+# ===== SIMPAN LOG PESAN TELEGRAM =====
+def log_message_to_csv(user, text):
+    waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    filename = "message_log.csv"
+    file_exists = os.path.isfile(filename)
+    with open(filename, mode="a", newline="", encoding="utf-8") as csvfile:
+        fieldnames = ["timestamp", "user", "username", "message"]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow({
+            "timestamp": waktu,
+            "user": user.first_name or "User",
+            "username": user.username or "-",
+            "message": text
+        })
+
+# ===== KIRIM EMAIL DENGAN ATTACHMENT =====
+def send_email(subject, body_text, attachments=None):
     msg = MIMEMultipart()
+    msg["Subject"] = Header(subject, "utf-8")
     msg["From"] = EMAIL_SENDER
     msg["To"] = ", ".join(EMAIL_RECEIVERS)
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
 
-    for f in attachments or []:
-        if os.path.isfile(f):
+    msg.attach(MIMEText(body_text, "plain"))
+
+    attachments = attachments or []
+    for file_path in attachments:
+        if os.path.isfile(file_path):
             part = MIMEBase("application", "octet-stream")
-            with open(f, "rb") as file:
-                part.set_payload(file.read())
+            with open(file_path, "rb") as f:
+                part.set_payload(f.read())
             encoders.encode_base64(part)
-            part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(f)}")
+            part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(file_path)}")
             msg.attach(part)
 
-    with smtplib.SMTP("smtp.gmail.com", 587) as server:
-        server.starttls()
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.send_message(msg)
-    log("EMAIL", f"Sent: {subject}")
+    status = "Terkirim"
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.send_message(msg)
+        log_terminal("EMAIL", f"Terkirim ke {msg['To']} | Subject: '{subject}'")
+    except Exception as e:
+        status = f"Gagal: {e}"
+        log_terminal("EMAIL", f"Gagal kirim ke {msg['To']} | Subject: '{subject}' | Error: {e}")
 
-# ===============================
-# BOT HANDLERS
-# ===============================
+    log_email_to_csv(subject, msg["To"], status)
+    return status
+
+
+# ===== FORMAT WAKTU MANUAL =====
+def get_waktu_sekarang():
+    hari_list = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+    bulan_list = [
+        "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+        "Juli", "Agustus", "September", "Oktober", "November", "Desember"
+    ]
+    now = datetime.now()
+    hari = hari_list[now.weekday()]
+    tanggal = now.day
+    bulan = bulan_list[now.month - 1]
+    tahun = now.year
+    jam_menit = now.strftime("%H:%M")
+    return f"{hari}, {tanggal} {bulan} {tahun} • {jam_menit}"
+
+
+# ===== BUFFER DAN FLUSH FUNKSI =====
+async def flush_pending_messages(context):
+    """Kirim semua pesan yang tertunda setelah 1 menit idle"""
+    if "pending_messages" not in context.bot_data or not context.bot_data["pending_messages"]:
+        return
+
+    combined_messages = context.bot_data["pending_messages"]
+    context.bot_data["pending_messages"] = []
+
+    body = ""
+    attachments = []
+    for m in combined_messages:
+        body += f"\n---\nDari: {m['from']}\nPesan:\n{m['text']}\n"
+        attachments.extend(m["attachments"])
+
+    # ===== GUNAKAN FORMAT WAKTU MANUAL =====
+    waktu_sekarang = get_waktu_sekarang()
+    subject = f"From Baba & Ibun – {waktu_sekarang}"
+
+    status = send_email(subject, body, attachments)
+
+    # Bersihkan file setelah terkirim
+    if status == "Terkirim":
+        for f in attachments:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except Exception as e:
+                log_terminal("SYSTEM", f"Gagal hapus file {f}: {e}")
+
+    log_terminal("SYSTEM", f"✅ Semua pesan pending telah dikirim ({len(attachments)} lampiran).")
+    context.bot_data["flush_task"] = None
+
+
+# ===== MANUAL TRIGGER UNTUK KIRIM SEGERA =====
+async def send_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "pending_messages" not in context.bot_data or not context.bot_data["pending_messages"]:
+        await update.message.reply_text("📭 Tidak ada pesan yang menunggu untuk dikirim.")
+        return
+
+    await update.message.reply_text("🚀 Mengirim semua pesan yang tertunda sekarang...")
+    await flush_pending_messages(context)
+
+
+# ===== HANDLER TELEGRAM =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Bot aktif dan berjalan di Render.")
+    await update.message.reply_text("Halo! Saya adalah bot kamu.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
-    text = update.message.text or "(tanpa teks)"
+    text = update.message.text or update.message.caption or "(tidak ada teks)"
     attachments = []
 
     os.makedirs("downloads", exist_ok=True)
 
+    # ===== DOWNLOAD PHOTO =====
     if update.message.photo:
         photo = update.message.photo[-1]
         file = await photo.get_file()
-        path = f"downloads/{photo.file_id}.jpg"
+        path = f"downloads/photo_{photo.file_id}.jpg"
         await file.download_to_drive(custom_path=path)
         attachments.append(path)
 
+    # ===== DOWNLOAD DOCUMENT =====
     if update.message.document:
         doc = update.message.document
         file = await doc.get_file()
@@ -84,44 +181,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(custom_path=path)
         attachments.append(path)
 
-    subject = f"Pesan dari {user.first_name or 'User'} – {datetime.now():%Y-%m-%d %H:%M}"
-    body = f"Nama: {user.first_name}\nUsername: @{user.username or '-'}\nPesan:\n{text}"
+    # ===== DOWNLOAD VIDEO =====
+    if update.message.video:
+        video = update.message.video
+        file = await video.get_file()
+        path = f"downloads/video_{video.file_id}.mp4"
+        await file.download_to_drive(custom_path=path)
+        attachments.append(path)
 
-    try:
-        send_email(subject, body, attachments)
-        await update.message.reply_text("📩 Pesan dan file terkirim ke email.")
-    except Exception as e:
-        log("EMAIL", f"Error: {e}")
-        await update.message.reply_text("❌ Gagal mengirim email.")
+    # ===== LOG TELEGRAM =====
+    log_terminal("TELEGRAM", f"Dari: {user.first_name or 'User'} (@{user.username or '-'}) | Pesan: {text} | Attachments: {len(attachments)}")
+    log_message_to_csv(user, text)
 
-async def send_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Fitur kirim manual belum aktif di versi ini.")
+    # ===== SIMPAN KE BUFFER =====
+    if "pending_messages" not in context.bot_data:
+        context.bot_data["pending_messages"] = []
 
-# ===============================
-# MAIN LOOP (RENDER SAFE)
-# ===============================
-async def main():
-    bot = Bot(TELEGRAM_TOKEN)
-    await bot.delete_webhook(drop_pending_updates=True)
-    log("SYSTEM", "Webhook dihapus. Mulai polling...")
+    context.bot_data["pending_messages"].append({
+        "from": f"{user.first_name or 'User'} (@{user.username or '-'})",
+        "text": text,
+        "attachments": attachments
+    })
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("send", send_now))
-    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+    # ===== RESET / JADWALKAN FLUSH =====
+    if "flush_task" in context.bot_data and context.bot_data["flush_task"]:
+        context.bot_data["flush_task"].cancel()
+
+    context.bot_data["flush_task"] = asyncio.create_task(asyncio.sleep(60))
+    context.bot_data["flush_task"].add_done_callback(lambda _: asyncio.create_task(flush_pending_messages(context)))
+
+    await update.message.reply_text("✅ Pesan kamu diterima, akan dikirim ke email setelah 1 menit tanpa aktivitas baru.")
+
+
+# ===== BUILD BOT =====
+app = Application.builder().token(TELEGRAM_TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+app.add_handler(CommandHandler("sent", send_now))
+
+# ===== RUN BOT =====
+if __name__ == "__main__":
+    import nest_asyncio
+    nest_asyncio.apply()
 
     while True:
         try:
-            await app.run_polling(close_loop=False)
-        except Conflict:
-            log("SYSTEM", "⚠️ Conflict terdeteksi, menunggu 10 detik lalu retry...")
-            await asyncio.sleep(10)
+            log_terminal("SYSTEM", "🤖 Bot sedang berjalan... Tekan Ctrl+C untuk berhenti.")
+            app.run_polling()
         except TimedOut:
-            log("SYSTEM", "⏱ Timeout, retrying...")
-            await asyncio.sleep(5)
-        except Exception as e:
-            log("SYSTEM", f"Error: {e}")
-            await asyncio.sleep(5)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+            log_terminal("SYSTEM", "⏱ Timeout terjadi, mencoba lagi dalam 5 detik...")
+            time.sleep(5)
+        except KeyboardInterrupt:
+            log_terminal("SYSTEM", "🛑 Bot dihentikan secara manual.")
+            break
