@@ -1,19 +1,20 @@
 import os
 import smtplib
 import asyncio
+import threading
+import warnings
+import csv
+import time
+from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email import encoders
+from email.header import Header
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
-from datetime import datetime
-import warnings
-import csv
-import time
-from email.header import Header
-from flask import Flask, request
-import threading
+from telegram.error import TimedOut, Conflict
 import nest_asyncio
 
 # ===== SUPPRESS WARNING =====
@@ -24,13 +25,11 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVERS = os.getenv("EMAIL_RECEIVERS", "abriellarayasha@gmail.com").split(",")
-RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "https://telegram-fcyk.onrender.com")
-PORT = int(os.getenv("PORT", 10000))
 
 if not TELEGRAM_TOKEN or not EMAIL_SENDER or not EMAIL_PASSWORD:
     raise EnvironmentError("⚠️ Missing environment variables! Please set TELEGRAM_TOKEN, EMAIL_SENDER, and EMAIL_PASSWORD.")
 
-# ===== LOGGING DI TERMINAL =====
+# ===== LOGGING =====
 def log_terminal(msg_type, message):
     waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{waktu}] [{msg_type}] {message}")
@@ -142,7 +141,7 @@ async def flush_pending_messages(context):
     log_terminal("SYSTEM", f"✅ Semua pesan pending telah dikirim ({len(attachments)} lampiran).")
     context.bot_data["flush_task"] = None
 
-# ===== COMMAND MANUAL =====
+# ===== COMMANDS =====
 async def send_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "pending_messages" not in context.bot_data or not context.bot_data["pending_messages"]:
         await update.message.reply_text("📭 Tidak ada pesan yang menunggu untuk dikirim.")
@@ -151,9 +150,9 @@ async def send_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await flush_pending_messages(context)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Halo! Saya adalah bot kamu.")
+    await update.message.reply_text("Halo! Saya adalah bot kamu 😄 Kirim pesan atau gambar, nanti saya kirim ke email otomatis.")
 
-# ===== HANDLER PESAN =====
+# ===== HANDLE PESAN =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     text = update.message.text or update.message.caption or "(tidak ada teks)"
@@ -202,37 +201,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("✅ Pesan kamu diterima. Akan dikirim ke email setelah 1 menit tanpa pesan baru.")
 
-# ===== FLASK UNTUK KEEPALIVE DAN WEBHOOK =====
-flask_app = Flask(__name__)
+# ===== FLASK KEEPALIVE =====
+flask_app = Flask("keepalive")
 
-@flask_app.route("/", methods=["GET"])
+@flask_app.route("/")
 def home():
-    return "Bot is running", 200
-
-@flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
-def webhook():
-    from telegram import Update
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    asyncio.run(application.process_update(update))
-    return "ok", 200
+    return "Bot is running (Polling Mode)", 200
 
 def run_flask():
-    flask_app.run(host="0.0.0.0", port=PORT)
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port)
 
-# ===== START BOT MODE WEBHOOK =====
+# ===== MAIN LOOP =====
 if __name__ == "__main__":
     nest_asyncio.apply()
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("sent", send_now))
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-
     threading.Thread(target=run_flask, daemon=True).start()
 
-    log_terminal("SYSTEM", "🌐 Setting webhook...")
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TELEGRAM_TOKEN,
-        webhook_url=f"{RENDER_URL}/{TELEGRAM_TOKEN}",
-    )
+    while True:
+        try:
+            log_terminal("SYSTEM", "🤖 Bot berjalan di Render (Polling Mode)...")
+            app = Application.builder().token(TELEGRAM_TOKEN).build()
+            app.add_handler(CommandHandler("start", start))
+            app.add_handler(CommandHandler("sent", send_now))
+            app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+            app.run_polling(allowed_updates=Update.ALL_TYPES)
+        except Conflict:
+            log_terminal("SYSTEM", "⚠️ Detected multiple bot instances. Tunggu sebentar...")
+            time.sleep(15)
+        except TimedOut:
+            log_terminal("SYSTEM", "⏱ Timeout, mencoba lagi...")
+            time.sleep(5)
+        except KeyboardInterrupt:
+            log_terminal("SYSTEM", "🛑 Bot dihentikan secara manual.")
+            break
