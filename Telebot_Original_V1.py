@@ -13,6 +13,8 @@ import csv
 import time
 from telegram.error import TimedOut
 from email.header import Header
+from flask import Flask
+import threading
 
 # ===== SUPPRESS WARNING =====
 warnings.filterwarnings("ignore", category=UserWarning, module="apscheduler")
@@ -234,3 +236,15 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             log_terminal("SYSTEM", "🛑 Bot dihentikan secara manual.")
             break
+
+# === Keep-alive server ===
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def index():
+    return "Bot is running!", 200
+
+def run_web():
+    flask_app.run(host="0.0.0.0", port=10000)
+
+threading.Thread(target=run_web).start()
