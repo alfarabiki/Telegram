@@ -236,7 +236,7 @@ if __name__ == "__main__":
             log_terminal("SYSTEM", "🤖 Bot sedang berjalan di cloud (Polling mode)...")
             app = Application.builder().token(TELEGRAM_TOKEN).build()
             app.add_handler(CommandHandler("start", start))
-            app.add_handler(CommandHandler("send", send_now))
+            app.add_handler(CommandHandler(["send", "sent"], send_now))
             app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
             app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
