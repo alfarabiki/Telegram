@@ -222,6 +222,19 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 app.add_handler(CommandHandler("sent", send_now))
 
+flask_app = Flask("keepalive")
+
+@flask_app.route("/")
+def home():
+    return "Bot is running", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port)
+
+# Jalankan flask di thread terpisah supaya bot polling tetap jalan
+threading.Thread(target=run_flask, daemon=True).start()
+
 # ===== RUN BOT =====
 if __name__ == "__main__":
     import nest_asyncio
@@ -238,15 +251,3 @@ if __name__ == "__main__":
             log_terminal("SYSTEM", "🛑 Bot dihentikan secara manual.")
             break
 
-flask_app = Flask("keepalive")
-
-@flask_app.route("/")
-def home():
-    return "Bot is running", 200
-
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port)
-
-# Jalankan flask di thread terpisah supaya bot polling tetap jalan
-threading.Thread(target=run_flask, daemon=True).start()
