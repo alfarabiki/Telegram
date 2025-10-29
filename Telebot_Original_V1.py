@@ -11,12 +11,12 @@ from datetime import datetime
 import warnings
 import csv
 import time
-from telegram.error import TimedOut
+from telegram.error import TimedOut, Conflict
 from email.header import Header
-# Keep-alive kecil untuk Render Web Service
 from flask import Flask
 import threading
-import os
+import nest_asyncio
+
 # ===== SUPPRESS WARNING =====
 warnings.filterwarnings("ignore", category=UserWarning, module="apscheduler")
 
@@ -97,7 +97,7 @@ def send_email(subject, body_text, attachments=None):
     return status
 
 
-# ===== FORMAT WAKTU MANUAL =====
+# ===== FORMAT WAKTU =====
 def get_waktu_sekarang():
     hari_list = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
     bulan_list = [
@@ -113,9 +113,8 @@ def get_waktu_sekarang():
     return f"{hari}, {tanggal} {bulan} {tahun} • {jam_menit}"
 
 
-# ===== BUFFER DAN FLUSH FUNKSI =====
+# ===== BUFFER DAN FLUSH =====
 async def flush_pending_messages(context):
-    """Kirim semua pesan yang tertunda setelah 1 menit idle"""
     if "pending_messages" not in context.bot_data or not context.bot_data["pending_messages"]:
         return
 
@@ -128,13 +127,11 @@ async def flush_pending_messages(context):
         body += f"\n---\nDari: {m['from']}\nPesan:\n{m['text']}\n"
         attachments.extend(m["attachments"])
 
-    # ===== GUNAKAN FORMAT WAKTU MANUAL =====
     waktu_sekarang = get_waktu_sekarang()
     subject = f"From Baba & Ibun – {waktu_sekarang}"
 
     status = send_email(subject, body, attachments)
 
-    # Bersihkan file setelah terkirim
     if status == "Terkirim":
         for f in attachments:
             try:
@@ -147,20 +144,20 @@ async def flush_pending_messages(context):
     context.bot_data["flush_task"] = None
 
 
-# ===== MANUAL TRIGGER UNTUK KIRIM SEGERA =====
+# ===== COMMAND MANUAL =====
 async def send_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if "pending_messages" not in context.bot_data or not context.bot_data["pending_messages"]:
         await update.message.reply_text("📭 Tidak ada pesan yang menunggu untuk dikirim.")
         return
-
-    await update.message.reply_text("🚀 Mengirim semua pesan yang tertunda sekarang...")
+    await update.message.reply_text("🚀 Mengirim semua pesan tertunda...")
     await flush_pending_messages(context)
 
 
-# ===== HANDLER TELEGRAM =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Halo! Saya adalah bot kamu.")
 
+
+# ===== HANDLER PESAN =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     text = update.message.text or update.message.caption or "(tidak ada teks)"
@@ -168,7 +165,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     os.makedirs("downloads", exist_ok=True)
 
-    # ===== DOWNLOAD PHOTO =====
     if update.message.photo:
         photo = update.message.photo[-1]
         file = await photo.get_file()
@@ -176,7 +172,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(custom_path=path)
         attachments.append(path)
 
-    # ===== DOWNLOAD DOCUMENT =====
     if update.message.document:
         doc = update.message.document
         file = await doc.get_file()
@@ -184,7 +179,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(custom_path=path)
         attachments.append(path)
 
-    # ===== DOWNLOAD VIDEO =====
     if update.message.video:
         video = update.message.video
         file = await video.get_file()
@@ -192,11 +186,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await file.download_to_drive(custom_path=path)
         attachments.append(path)
 
-    # ===== LOG TELEGRAM =====
-    log_terminal("TELEGRAM", f"Dari: {user.first_name or 'User'} (@{user.username or '-'}) | Pesan: {text} | Attachments: {len(attachments)}")
+    log_terminal("TELEGRAM", f"Dari: {user.first_name or 'User'} (@{user.username or '-'}) | Pesan: {text}")
     log_message_to_csv(user, text)
 
-    # ===== SIMPAN KE BUFFER =====
     if "pending_messages" not in context.bot_data:
         context.bot_data["pending_messages"] = []
 
@@ -206,22 +198,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "attachments": attachments
     })
 
-    # ===== RESET / JADWALKAN FLUSH =====
     if "flush_task" in context.bot_data and context.bot_data["flush_task"]:
         context.bot_data["flush_task"].cancel()
 
     context.bot_data["flush_task"] = asyncio.create_task(asyncio.sleep(60))
     context.bot_data["flush_task"].add_done_callback(lambda _: asyncio.create_task(flush_pending_messages(context)))
 
-    await update.message.reply_text("✅ Pesan kamu diterima, akan dikirim ke email setelah 1 menit tanpa aktivitas baru.")
+    await update.message.reply_text("✅ Pesan kamu diterima. Akan dikirim ke email setelah 1 menit tanpa pesan baru.")
 
 
-# ===== BUILD BOT =====
-app = Application.builder().token(TELEGRAM_TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-app.add_handler(CommandHandler("sent", send_now))
-
+# ===== FLASK KEEPALIVE =====
 flask_app = Flask("keepalive")
 
 @flask_app.route("/")
@@ -232,22 +218,26 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     flask_app.run(host="0.0.0.0", port=port)
 
-# Jalankan flask di thread terpisah supaya bot polling tetap jalan
-threading.Thread(target=run_flask, daemon=True).start()
 
-# ===== RUN BOT =====
+# ===== RUN BOT SAFELY =====
 if __name__ == "__main__":
-    import nest_asyncio
     nest_asyncio.apply()
+    threading.Thread(target=run_flask, daemon=True).start()
 
     while True:
         try:
-            log_terminal("SYSTEM", "🤖 Bot sedang berjalan... Tekan Ctrl+C untuk berhenti.")
+            log_terminal("SYSTEM", "🤖 Bot berjalan...")
+            app = Application.builder().token(TELEGRAM_TOKEN).build()
+            app.add_handler(CommandHandler("start", start))
+            app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+            app.add_handler(CommandHandler("sent", send_now))
             app.run_polling()
+        except Conflict:
+            log_terminal("SYSTEM", "⚠️ Detected multiple bot instances. Hentikan bot lain dan restart.")
+            time.sleep(15)
         except TimedOut:
-            log_terminal("SYSTEM", "⏱ Timeout terjadi, mencoba lagi dalam 5 detik...")
+            log_terminal("SYSTEM", "⏱ Timeout, mencoba lagi...")
             time.sleep(5)
         except KeyboardInterrupt:
-            log_terminal("SYSTEM", "🛑 Bot dihentikan secara manual.")
+            log_terminal("SYSTEM", "🛑 Bot dihentikan.")
             break
-
