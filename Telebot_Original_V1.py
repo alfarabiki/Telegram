@@ -13,8 +13,10 @@ import csv
 import time
 from telegram.error import TimedOut
 from email.header import Header
+# Keep-alive kecil untuk Render Web Service
 from flask import Flask
 import threading
+import os
 # ===== SUPPRESS WARNING =====
 warnings.filterwarnings("ignore", category=UserWarning, module="apscheduler")
 
@@ -236,14 +238,15 @@ if __name__ == "__main__":
             log_terminal("SYSTEM", "🛑 Bot dihentikan secara manual.")
             break
 
-# === Keep-alive server ===
-flask_app = Flask(__name__)
+flask_app = Flask("keepalive")
 
-@flask_app.route('/')
-def index():
-    return "Bot is running!", 200
+@flask_app.route("/")
+def home():
+    return "Bot is running", 200
 
-def run_web():
-    flask_app.run(host="0.0.0.0", port=10000)
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port)
 
-threading.Thread(target=run_web).start()
+# Jalankan flask di thread terpisah supaya bot polling tetap jalan
+threading.Thread(target=run_flask, daemon=True).start()
