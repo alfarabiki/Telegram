@@ -186,11 +186,19 @@ def index():
 def webhook():
     print("📩 Webhook hit! Ada update masuk.", file=sys.stderr)
     update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.run_coroutine_threadsafe(
-        application.process_update(update),
-        asyncio.get_event_loop(),
-    )
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(application.process_update(update))
+    except Exception as e:
+        log("ERROR", f"Gagal memproses update: {e}")
+        return f"error: {e}", 500
+    finally:
+        loop.close()
+
     return "ok", 200
+
 
 # ===============================
 # MAIN ENTRY POINT
