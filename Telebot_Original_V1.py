@@ -143,8 +143,16 @@ def index():
 
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.get_event_loop().create_task(application.process_update(update))
+    try:
+        update = Update.de_json(request.get_json(force=True), bot)
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        loop.create_task(application.process_update(update))
+    except Exception as e:
+        log("WEBHOOK", f"Error: {e}")
     return "ok", 200
 
 # ===============================
@@ -161,7 +169,7 @@ if __name__ == "__main__":
                 log("SYSTEM", f"✅ Webhook set: {webhook_url}")
             else:
                 log("SYSTEM", "⚠️ RAILWAY_STATIC_URL belum diset, webhook tidak aktif.")
-            
+
             # Kirim pesan ke admin setelah aktif
             if CHAT_ID_ADMIN:
                 await bot.send_message(
@@ -174,7 +182,7 @@ if __name__ == "__main__":
         except Exception as e:
             log("SYSTEM", f"⚠️ Gagal set webhook: {e}")
 
-    asyncio.get_event_loop().run_until_complete(setup_webhook())
+    asyncio.run(setup_webhook())
 
     port = int(os.environ.get("PORT", 8080))
     log("SYSTEM", f"🚀 Flask server aktif di port {port}")
