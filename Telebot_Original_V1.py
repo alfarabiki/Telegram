@@ -143,8 +143,9 @@ def index():
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.get_event_loop().create_task(application.process_update(update))
+    asyncio.run(application.process_update(update))
     return "ok", 200
+
 
 # ===============================
 # MAIN ENTRY
