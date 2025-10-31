@@ -22,6 +22,7 @@ from telegram.ext import (
     filters,
 )
 from flask import Flask, request
+import requests  # ✅ FIXED (untuk fallback SendGrid)
 
 warnings.filterwarnings("ignore", category=UserWarning, module="apscheduler")
 
@@ -34,19 +35,16 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVERS = os.getenv("EMAIL_RECEIVERS", "abriellarayasha@gmail.com").split(",")
 DOMAIN = os.getenv("RAILWAY_STATIC_URL") or os.getenv("RAILWAY_URL")
 
-# Optional SMTP override
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "1") == "1"
 
-# Optional API fallback (example SendGrid)
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
 if not TELEGRAM_TOKEN:
     raise EnvironmentError("⚠️ Missing TELEGRAM_TOKEN environment variable.")
-# EMAIL is optional but we'll warn if missing (we can still operate)
-if not EMAIL_SENDER or not EMAIL_PASSWORD:
-    print("⚠️ EMAIL_SENDER/EMAIL_PASSWORD not set — email mungkin gagal.", file=sys.stderr)
+if not EMAIL_SENDER:
+    print("⚠️ EMAIL_SENDER not set.", file=sys.stderr)
 
 # ===============================
 # LOGGING
@@ -63,14 +61,9 @@ def log_csv(path, header, row):
         writer.writerow(row)
 
 # ===============================
-# EMAIL FUNCTION (with retries)
+# EMAIL FUNCTION (SMTP + fallback SendGrid)
 # ===============================
 def send_email_smtp(subject, body, attachments=None, max_retries=3):
-    """Send email via SMTP with retries. Returns True/False."""
-    if not EMAIL_SENDER or not EMAIL_PASSWORD:
-        log("EMAIL", "Creds not set, skipping SMTP send.")
-        return False
-
     attachments = attachments or []
     for attempt in range(1, max_retries + 1):
         try:
@@ -86,10 +79,8 @@ def send_email_smtp(subject, body, attachments=None, max_retries=3):
                     with open(path, "rb") as f:
                         part.set_payload(f.read())
                     encoders.encode_base64(part)
-                    part.add_header(
-                        "Content-Disposition",
-                        f"attachment; filename={os.path.basename(path)}",
-                    )
+                    part.add_header("Content-Disposition",
+                                    f"attachment; filename={os.path.basename(path)}")
                     msg.attach(part)
 
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
@@ -99,59 +90,71 @@ def send_email_smtp(subject, body, attachments=None, max_retries=3):
                 server.send_message(msg)
 
             log("EMAIL", f"Terkirim ke {msg['To']} | Subject: {subject}")
-            log_csv("email_log.csv", ["timestamp", "to", "subject", "status"], [
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg["To"], subject, "Terkirim"
-            ])
             return True
+
         except Exception as e:
             log("EMAIL", f"Attempt {attempt}/{max_retries} gagal: {e}")
             if attempt < max_retries:
-                time.sleep(2 ** attempt)  # exponential backoff
+                time.sleep(2 ** attempt)
             else:
-                log_csv("email_log.csv", ["timestamp", "to", "subject", "status"], [
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ", ".join(EMAIL_RECEIVERS), subject, f"Gagal: {e}"
-                ])
+                # ✅ FIXED: fallback ke SendGrid
+                if SENDGRID_API_KEY:
+                    try:
+                        resp = requests.post(
+                            "https://api.sendgrid.com/v3/mail/send",
+                            headers={
+                                "Authorization": f"Bearer {SENDGRID_API_KEY}",
+                                "Content-Type": "application/json"
+                            },
+                            json={
+                                "personalizations": [{
+                                    "to": [{"email": EMAIL_RECEIVERS[0]}]
+                                }],
+                                "from": {"email": EMAIL_SENDER},
+                                "subject": subject,
+                                "content": [{"type": "text/plain", "value": body}],
+                            },
+                            timeout=10
+                        )
+                        if resp.status_code < 300:
+                            log("EMAIL", f"SendGrid fallback berhasil: {EMAIL_RECEIVERS}")
+                            return True
+                        else:
+                            log("EMAIL", f"SendGrid gagal: {resp.text}")
+                    except Exception as e2:
+                        log("EMAIL", f"SendGrid error: {e2}")
                 return False
 
 async def send_email(subject, body, attachments=None):
-    """Wrapper to call blocking send_email_smtp in threadpool."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, send_email_smtp, subject, body, attachments)
 
 # ===============================
-# TELEGRAM BOT + BUFFERING LOGIC
+# TELEGRAM BOT LOGIC
 # ===============================
 flask_app = Flask(__name__)
 bot = Bot(token=TELEGRAM_TOKEN)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# dedupe processed updates (keep small TTL)
 PROCESSED_UPDATES = {}
-PROCESSED_TTL = 120  # seconds
+PROCESSED_TTL = 120
 processed_lock = threading.Lock()
-
-# per-chat buffer for bulk attachments and delayed sending
 per_chat_buffers = {}
-buffers_lock = asyncio.Lock()  # used inside async handlers
+buffers_lock = asyncio.Lock()
 
 def cleanup_processed():
-    """Clean old update_ids (periodic)."""
     now = time.time()
     with processed_lock:
         to_del = [k for k, v in PROCESSED_UPDATES.items() if now - v > PROCESSED_TTL]
         for k in to_del:
             del PROCESSED_UPDATES[k]
 
-# helper waktu
 def waktu_now():
-    bulan = [
-        "Januari","Februari","Maret","April","Mei","Juni",
-        "Juli","Agustus","September","Oktober","November","Desember",
-    ]
+    bulan = ["Januari","Februari","Maret","April","Mei","Juni",
+             "Juli","Agustus","September","Oktober","November","Desember"]
     now = datetime.now()
     return f"{now.day} {bulan[now.month-1]} {now.year} • {now.strftime('%H:%M')}"
 
-# flush function - will be scheduled per chat
 async def flush_chat_buffer(chat_id):
     async with buffers_lock:
         buf = per_chat_buffers.get(chat_id)
@@ -161,37 +164,22 @@ async def flush_chat_buffer(chat_id):
         attachments = buf.get("attachments", [])
         username = buf.get("username", "-")
         first_name = buf.get("first_name", "-")
-        # prepare body and subject
         subj = f"From Baba & Ibun – {waktu_now()} (chat {chat_id})"
         body = f"Dari: {first_name} (@{username})\n\nPesan gabungan:\n\n" + "\n\n---\n\n".join(texts or ["(kosong)"])
-        # attempt to send email (blocking called in executor)
-        success = await send_email(subj, body, attachments=attachments)
-        # inform user on telegram
+        success = await send_email(subj, body, attachments)
         try:
             if success:
-                await bot.send_message(chat_id=chat_id, text="✅ Pesan & lampiran berhasil dikirim ke email.")
+                await bot.send_message(chat_id, "✅ Pesan & lampiran berhasil dikirim ke email.")
             else:
-                await bot.send_message(chat_id=chat_id, text="❌ Gagal mengirim email. Cek konfigurasi SMTP atau gunakan API email.")
+                await bot.send_message(chat_id, "❌ Gagal mengirim email. Coba lagi nanti.")
         except Exception as e:
-            log("TELEGRAM", f"Gagal kirim konfirmasi ke chat {chat_id}: {e}")
-
-        # log and cleanup
-        log_csv("message_log.csv", ["timestamp", "chat_id", "username", "texts", "attachments"], [
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            chat_id,
-            username,
-            " || ".join(texts),
-            ", ".join(attachments),
-        ])
-        # remove buffer
+            log("TELEGRAM", f"Gagal kirim notifikasi: {e}")
         del per_chat_buffers[chat_id]
 
-# handler functions
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Halo! Bot ini aktif di Railway dan siap menerima pesan kamu!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # dedupe update
     uid = update.update_id
     with processed_lock:
         cleanup_processed()
@@ -200,49 +188,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         PROCESSED_UPDATES[uid] = time.time()
 
-    # extract data
     user = update.message.from_user
     chat_id = update.effective_chat.id
     text = update.message.text or update.message.caption or "(tidak ada teks)"
     attachments = []
     os.makedirs("downloads", exist_ok=True)
 
-    # save attachments (photo/document/video/audio)
     try:
         if update.message.photo:
             file = await update.message.photo[-1].get_file()
             path = f"downloads/{file.file_id}.jpg"
-            await file.download_to_drive(custom_path=path)
+            await file.download_to_drive(path)
             attachments.append(path)
-
         if update.message.document:
             file = await update.message.document.get_file()
             path = f"downloads/{update.message.document.file_name}"
-            await file.download_to_drive(custom_path=path)
-            attachments.append(path)
-
-        if update.message.video:
-            file = await update.message.video.get_file()
-            path = f"downloads/{file.file_id}.mp4"
-            await file.download_to_drive(custom_path=path)
-            attachments.append(path)
-
-        if update.message.audio:
-            file = await update.message.audio.get_file()
-            path = f"downloads/{file.file_id}.ogg"
-            await file.download_to_drive(custom_path=path)
+            await file.download_to_drive(path)
             attachments.append(path)
     except Exception as e:
         log("TELEGRAM", f"Gagal download attachment: {e}")
 
     log("TELEGRAM", f"Dari {user.first_name} | Pesan: {text}")
-    # immediate ack to user
-    try:
-        await update.message.reply_text("📥 Pesan diterima. Akan dikirim dalam 1 menit (bulk untuk lampiran).")
-    except Exception as e:
-        log("TELEGRAM", f"Gagal kirim ack: {e}")
+    await update.message.reply_text("📥 Pesan diterima. Akan dikirim dalam 1 menit (bulk untuk lampiran).")
 
-    # append to per-chat buffer and schedule flush (reset timer)
     async with buffers_lock:
         buf = per_chat_buffers.get(chat_id)
         if not buf:
@@ -258,51 +226,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buf["texts"].append(text)
             buf["attachments"].extend(attachments)
 
-        # cancel previous timer and create new one (delay 60s)
         if buf.get("timer_handle"):
-            try:
-                buf["timer_handle"].cancel()
-            except Exception:
-                pass
+            buf["timer_handle"].cancel()
 
         loop = asyncio.get_running_loop()
-        # schedule flush_chat_buffer(chat_id) after 60 seconds
-        handle = loop.call_later(60, lambda cid=chat_id: asyncio.create_task(flush_chat_buffer(cid)))
-        buf["timer_handle"] = handle
+        buf["timer_handle"] = loop.call_later(60, lambda cid=chat_id: asyncio.create_task(flush_chat_buffer(cid)))
 
 # ===============================
-# FLASK WEBHOOK (safe submit to application)
-# We'll create a dedicated asyncio loop thread on startup so we can
-# call `asyncio.run_coroutine_threadsafe` safely from here.
+# FLASK WEBHOOK (dedupe fix)
 # ===============================
 GLOBAL_LOOP = None
 
-@flask_app.route("/", methods=["GET"])
-def index():
-    return "🤖 Bot is running on Railway", 200
-
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
-    # Flask's request runs in thread; just submit update to telegram application loop
     log("SYSTEM", "📩 Webhook hit! Ada update masuk.")
-    update = Update.de_json(request.get_json(force=True), bot)
+    update_json = request.get_json(force=True)
+    update = Update.de_json(update_json, bot)
+    update_id = update.update_id
+
+    # ✅ FIXED: dedup di sini juga
+    with processed_lock:
+        if update_id in PROCESSED_UPDATES:
+            log("SYSTEM", f"Duplicate webhook {update_id}, abaikan.")
+            return "duplicate", 200
+        PROCESSED_UPDATES[update_id] = time.time()
+
     try:
-        # submit to telegram application for processing
-        future = asyncio.run_coroutine_threadsafe(application.process_update(update), GLOBAL_LOOP)
-        # Optionally wait a short time for scheduling to ensure handler accepted
-        # but do not block long - simply return quickly.
-        try:
-            _ = future.result(timeout=1)
-        except Exception:
-            # ignore timeout — handler will run in background loop
-            pass
+        asyncio.run_coroutine_threadsafe(application.process_update(update), GLOBAL_LOOP)
     except Exception as e:
-        log("SYSTEM", f"Gagal submit update ke app loop: {e}")
-        return f"error: {e}", 500
+        log("SYSTEM", f"Gagal submit update ke loop: {e}")
+        return str(e), 500
     return "ok", 200
 
 # ===============================
-# STARTUP: create background loop thread and initialize application in that loop
+# STARTUP
 # ===============================
 def start_background_loop(loop):
     asyncio.set_event_loop(loop)
@@ -311,35 +268,21 @@ def start_background_loop(loop):
 async def init_app():
     await application.initialize()
     await application.start()
-    # remove webhook and server-side webhook set
     await bot.delete_webhook(drop_pending_updates=True)
-    # set webhook if DOMAIN available
-    webhook_url = f"https://{DOMAIN}/{TELEGRAM_TOKEN}" if DOMAIN else None
-    if webhook_url:
-        try:
-            await bot.set_webhook(url=webhook_url)
-            log("SYSTEM", f"✅ Webhook set: {webhook_url}")
-        except Exception as e:
-            log("SYSTEM", f"⚠️ Gagal set webhook: {e}")
-    else:
-        log("SYSTEM", "⚠️ DOMAIN (RAILWAY_STATIC_URL) belum diset.")
+    if DOMAIN:
+        url = f"https://{DOMAIN}/{TELEGRAM_TOKEN}"
+        await bot.set_webhook(url=url)
+        log("SYSTEM", f"✅ Webhook set: {url}")
 
 def main():
     global GLOBAL_LOOP
-    # create and start background loop thread
     GLOBAL_LOOP = asyncio.new_event_loop()
-    t = threading.Thread(target=start_background_loop, args=(GLOBAL_LOOP,), daemon=True)
-    t.start()
-    # initialize the telegram application inside that loop
+    threading.Thread(target=start_background_loop, args=(GLOBAL_LOOP,), daemon=True).start()
     asyncio.run_coroutine_threadsafe(init_app(), GLOBAL_LOOP).result(timeout=10)
-
-    # run flask (development server) - if you want production, use Gunicorn + Uvicorn/Gunicorn + Workers
     port = int(os.environ.get("PORT", 8080))
-    log("SYSTEM", f"🚀 Flask server aktif di port {port}")
     flask_app.run(host="0.0.0.0", port=port, debug=False)
 
 if __name__ == "__main__":
-    # register handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     main()
