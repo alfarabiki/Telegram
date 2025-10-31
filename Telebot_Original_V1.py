@@ -2,9 +2,8 @@
 import os
 import smtplib
 import asyncio
-import threading
-import warnings
 import csv
+import warnings
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -30,6 +29,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVERS = os.getenv("EMAIL_RECEIVERS", "abriellarayasha@gmail.com").split(",")
+DOMAIN = os.getenv("RAILWAY_STATIC_URL") or os.getenv("RAILWAY_URL")
+CHAT_ID_ADMIN = os.getenv("CHAT_ID_ADMIN")  # Tambahkan di Railway
 
 if not TELEGRAM_TOKEN or not EMAIL_SENDER or not EMAIL_PASSWORD:
     raise EnvironmentError("⚠️ Missing environment variables. Please set TELEGRAM_TOKEN, EMAIL_SENDER, and EMAIL_PASSWORD.")
@@ -84,7 +85,7 @@ def send_email(subject, body, attachments=None):
         return False
 
 # ===============================
-# HELPER
+# HANDLERS
 # ===============================
 def waktu_now():
     bulan = ["Januari", "Februari", "Maret", "April", "Mei", "Juni",
@@ -92,11 +93,8 @@ def waktu_now():
     now = datetime.now()
     return f"{now.day} {bulan[now.month-1]} {now.year} • {now.strftime('%H:%M')}"
 
-# ===============================
-# HANDLERS
-# ===============================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Halo! Bot ini aktif di cloud dan siap menerima pesan kamu!")
+    await update.message.reply_text("👋 Halo! Bot ini aktif di Railway dan siap menerima pesan kamu!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
@@ -131,9 +129,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Gagal mengirim email, coba lagi nanti.")
 
 # ===============================
-# FLASK SERVER (Webhook Receiver)
+# FLASK SERVER
 # ===============================
 flask_app = Flask(__name__)
+bot = Bot(token=TELEGRAM_TOKEN)
+application = Application.builder().token(TELEGRAM_TOKEN).build()
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
 @flask_app.route("/", methods=["GET"])
 def index():
@@ -142,31 +144,37 @@ def index():
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.run(application.process_update(update))
+    asyncio.get_event_loop().create_task(application.process_update(update))
     return "ok", 200
 
 # ===============================
 # MAIN ENTRY
 # ===============================
 if __name__ == "__main__":
-    bot = Bot(token=TELEGRAM_TOKEN)
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-
-    # Set webhook URL (Railway)
-    YOUR_DOMAIN = os.getenv("RAILWAY_STATIC_URL") or os.getenv("RAILWAY_URL") or "your-app.up.railway.app"
-    webhook_url = f"https://{YOUR_DOMAIN}/{TELEGRAM_TOKEN}"
+    webhook_url = f"https://{DOMAIN}/{TELEGRAM_TOKEN}" if DOMAIN else None
 
     async def setup_webhook():
         try:
-            await bot.delete_webhook()
-            await bot.set_webhook(url=webhook_url)
-            log("SYSTEM", f"✅ Webhook set: {webhook_url}")
+            await bot.delete_webhook(drop_pending_updates=True)
+            if webhook_url:
+                await bot.set_webhook(url=webhook_url)
+                log("SYSTEM", f"✅ Webhook set: {webhook_url}")
+            else:
+                log("SYSTEM", "⚠️ RAILWAY_STATIC_URL belum diset, webhook tidak aktif.")
+            
+            # Kirim pesan ke admin setelah aktif
+            if CHAT_ID_ADMIN:
+                await bot.send_message(
+                    chat_id=int(CHAT_ID_ADMIN),
+                    text="🤖 Bot baru saja aktif!\n\nHallo apa yang mau kamu share tentang aku?!"
+                )
+                log("SYSTEM", f"📩 Pesan startup dikirim ke chat_id: {CHAT_ID_ADMIN}")
+            else:
+                log("SYSTEM", "⚠️ CHAT_ID_ADMIN belum diset, tidak kirim pesan startup.")
         except Exception as e:
             log("SYSTEM", f"⚠️ Gagal set webhook: {e}")
 
-    asyncio.run(setup_webhook())
+    asyncio.get_event_loop().run_until_complete(setup_webhook())
 
     port = int(os.environ.get("PORT", 8080))
     log("SYSTEM", f"🚀 Flask server aktif di port {port}")
