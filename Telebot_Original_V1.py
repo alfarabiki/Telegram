@@ -5,7 +5,6 @@ import asyncio
 import threading
 import warnings
 import csv
-import time
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -20,15 +19,13 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from telegram.error import TimedOut, Conflict
-from flask import Flask
-import nest_asyncio
+from flask import Flask, request
+
+warnings.filterwarnings("ignore", category=UserWarning, module="apscheduler")
 
 # ===============================
 # CONFIG
 # ===============================
-warnings.filterwarnings("ignore", category=UserWarning, module="apscheduler")
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
@@ -37,56 +34,38 @@ EMAIL_RECEIVERS = os.getenv("EMAIL_RECEIVERS", "abriellarayasha@gmail.com").spli
 if not TELEGRAM_TOKEN or not EMAIL_SENDER or not EMAIL_PASSWORD:
     raise EnvironmentError("⚠️ Missing environment variables. Please set TELEGRAM_TOKEN, EMAIL_SENDER, and EMAIL_PASSWORD.")
 
-
 # ===============================
-# LOGGING HELPERS
+# LOGGING
 # ===============================
-def log_terminal(tag, message):
-    waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{waktu}] [{tag}] {message}")
+def log(tag, msg):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{tag}] {msg}")
 
-
-def log_email_to_csv(subject, to, status):
-    waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open("email_log.csv", "a", newline="", encoding="utf-8") as f:
+def log_csv(path, header, row):
+    new_file = not os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        if f.tell() == 0:
-            writer.writerow(["timestamp", "to", "subject", "status"])
-        writer.writerow([waktu, to, subject, status])
-
-
-def log_message_to_csv(user, text):
-    waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open("message_log.csv", "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if f.tell() == 0:
-            writer.writerow(["timestamp", "user", "username", "message"])
-        writer.writerow([
-            waktu,
-            user.first_name or "User",
-            user.username or "-",
-            text,
-        ])
-
+        if new_file:
+            writer.writerow(header)
+        writer.writerow(row)
 
 # ===============================
 # EMAIL FUNCTION
 # ===============================
-def send_email(subject, body_text, attachments=None):
+def send_email(subject, body, attachments=None):
     msg = MIMEMultipart()
     msg["Subject"] = Header(subject, "utf-8")
     msg["From"] = EMAIL_SENDER
     msg["To"] = ", ".join(EMAIL_RECEIVERS)
-    msg.attach(MIMEText(body_text, "plain"))
+    msg.attach(MIMEText(body, "plain"))
 
     attachments = attachments or []
-    for file_path in attachments:
-        if os.path.isfile(file_path):
+    for path in attachments:
+        if os.path.isfile(path):
             part = MIMEBase("application", "octet-stream")
-            with open(file_path, "rb") as f:
+            with open(path, "rb") as f:
                 part.set_payload(f.read())
             encoders.encode_base64(part)
-            part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(file_path)}")
+            part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(path)}")
             msg.attach(part)
 
     try:
@@ -94,158 +73,101 @@ def send_email(subject, body_text, attachments=None):
             server.starttls()
             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
             server.send_message(msg)
-        status = "Terkirim"
-        log_terminal("EMAIL", f"Terkirim ke {msg['To']} | Subject: {subject}")
+        log("EMAIL", f"Terkirim ke {msg['To']} | Subject: {subject}")
+        log_csv("email_log.csv", ["timestamp", "to", "subject", "status"],
+                [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg["To"], subject, "Terkirim"])
+        return True
     except Exception as e:
-        status = f"Gagal: {e}"
-        log_terminal("EMAIL", f"Gagal kirim: {e}")
-
-    log_email_to_csv(subject, msg["To"], status)
-    return status
-
+        log("EMAIL", f"Gagal kirim: {e}")
+        log_csv("email_log.csv", ["timestamp", "to", "subject", "status"],
+                [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg["To"], subject, f"Gagal: {e}"])
+        return False
 
 # ===============================
-# WAKTU FORMATTER
+# HELPER
 # ===============================
-def get_waktu_sekarang():
-    hari_list = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
-    bulan_list = [
-        "Januari", "Februari", "Maret", "April", "Mei", "Juni",
-        "Juli", "Agustus", "September", "Oktober", "November", "Desember"
-    ]
+def waktu_now():
+    bulan = ["Januari", "Februari", "Maret", "April", "Mei", "Juni",
+             "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
     now = datetime.now()
-    hari = hari_list[now.weekday()]
-    bulan = bulan_list[now.month - 1]
-    return f"{hari}, {now.day} {bulan} {now.year} • {now.strftime('%H:%M')}"
-
+    return f"{now.day} {bulan[now.month-1]} {now.year} • {now.strftime('%H:%M')}"
 
 # ===============================
-# BUFFER MESSAGE
-# ===============================
-async def flush_pending_messages(context):
-    pending = context.bot_data.get("pending_messages", [])
-    if not pending:
-        return
-
-    body = ""
-    attachments = []
-    for msg in pending:
-        body += f"\n---\nDari: {msg['from']}\nPesan:\n{msg['text']}\n"
-        attachments.extend(msg["attachments"])
-
-    context.bot_data["pending_messages"] = []
-
-    subject = f"From Baba & Ibun – {get_waktu_sekarang()}"
-    status = send_email(subject, body, attachments)
-
-    if status == "Terkirim":
-        for f in attachments:
-            try:
-                os.remove(f)
-            except Exception as e:
-                log_terminal("SYSTEM", f"Gagal hapus file {f}: {e}")
-
-    log_terminal("SYSTEM", f"✅ Pesan terkirim ({len(attachments)} lampiran)")
-
-
-# ===============================
-# TELEGRAM HANDLERS
+# HANDLERS
 # ===============================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Halo 👋 Bot ini aktif di cloud dan siap menerima pesan kamu!")
-
+    await update.message.reply_text("👋 Halo! Bot ini aktif di cloud dan siap menerima pesan kamu!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     text = update.message.text or update.message.caption or "(tidak ada teks)"
     attachments = []
-
     os.makedirs("downloads", exist_ok=True)
 
     if update.message.photo:
-        photo = update.message.photo[-1]
-        file = await photo.get_file()
-        path = f"downloads/photo_{photo.file_id}.jpg"
+        file = await update.message.photo[-1].get_file()
+        path = f"downloads/{file.file_id}.jpg"
         await file.download_to_drive(custom_path=path)
         attachments.append(path)
 
     if update.message.document:
-        doc = update.message.document
-        file = await doc.get_file()
-        path = f"downloads/{doc.file_name}"
+        file = await update.message.document.get_file()
+        path = f"downloads/{update.message.document.file_name}"
         await file.download_to_drive(custom_path=path)
         attachments.append(path)
 
-    log_terminal("TELEGRAM", f"Dari {user.first_name or 'User'} | Pesan: {text}")
-    log_message_to_csv(user, text)
+    log("TELEGRAM", f"Dari {user.first_name} | Pesan: {text}")
+    log_csv("message_log.csv",
+            ["timestamp", "user", "username", "message"],
+            [datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             user.first_name, user.username or "-", text])
 
-    context.bot_data.setdefault("pending_messages", []).append({
-        "from": f"{user.first_name or 'User'} (@{user.username or '-'})",
-        "text": text,
-        "attachments": attachments
-    })
+    subject = f"From Baba & Ibun – {waktu_now()}"
+    body = f"Dari: {user.first_name} (@{user.username or '-'})\n\nPesan:\n{text}"
 
-    if "flush_task" in context.bot_data and context.bot_data["flush_task"]:
-        context.bot_data["flush_task"].cancel()
-
-    context.bot_data["flush_task"] = asyncio.create_task(asyncio.sleep(60))
-    context.bot_data["flush_task"].add_done_callback(lambda _: asyncio.create_task(flush_pending_messages(context)))
-
-    await update.message.reply_text("✅ Pesan kamu diterima dan akan dikirim ke email dalam 1 menit tanpa aktivitas baru.")
-
-
-async def send_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🚀 Mengirim semua pesan tertunda...")
-    await flush_pending_messages(context)
-
+    if send_email(subject, body, attachments):
+        await update.message.reply_text("✅ Pesan kamu sudah dikirim ke email.")
+    else:
+        await update.message.reply_text("❌ Gagal mengirim email, coba lagi nanti.")
 
 # ===============================
-# KEEPALIVE SERVER (FLASK)
+# FLASK SERVER (Webhook Receiver)
 # ===============================
-flask_app = Flask("keepalive")
+flask_app = Flask(__name__)
 
-@flask_app.route("/")
-def home():
-    return "Bot is running fine.", 200
+@flask_app.route("/", methods=["GET"])
+def index():
+    return "🤖 Bot is running on Railway.", 200
 
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port)
-
+@flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    asyncio.run(application.process_update(update))
+    return "ok", 200
 
 # ===============================
-# MAIN LOOP (RENDER FRIENDLY)
+# MAIN ENTRY
 # ===============================
 if __name__ == "__main__":
-    nest_asyncio.apply()
-    threading.Thread(target=run_flask, daemon=True).start()
+    bot = Bot(token=TELEGRAM_TOKEN)
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-    # Reset webhook sebelum polling (agar tidak conflict)
-    async def reset_webhook():
-        bot = Bot(TELEGRAM_TOKEN)
+    # Set webhook URL (Railway)
+    YOUR_DOMAIN = os.getenv("RAILWAY_STATIC_URL") or os.getenv("RAILWAY_URL") or "your-app.up.railway.app"
+    webhook_url = f"https://{YOUR_DOMAIN}/{TELEGRAM_TOKEN}"
+
+    async def setup_webhook():
         try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            log_terminal("SYSTEM", "🔄 Webhook dan sesi lama dibersihkan.")
+            await bot.delete_webhook()
+            await bot.set_webhook(url=webhook_url)
+            log("SYSTEM", f"✅ Webhook set: {webhook_url}")
         except Exception as e:
-            log_terminal("SYSTEM", f"⚠️ Gagal reset webhook: {e}")
+            log("SYSTEM", f"⚠️ Gagal set webhook: {e}")
 
-    asyncio.run(reset_webhook())
+    asyncio.run(setup_webhook())
 
-    while True:
-        try:
-            log_terminal("SYSTEM", "🤖 Bot sedang berjalan di cloud (Polling mode)...")
-            app = Application.builder().token(TELEGRAM_TOKEN).build()
-            app.add_handler(CommandHandler("start", start))
-            app.add_handler(CommandHandler("send", send_now))
-            app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-
-            app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-        except Conflict:
-            log_terminal("SYSTEM", "⚠️ Conflict terdeteksi — menunggu instance lain berhenti...")
-            time.sleep(15)
-        except TimedOut:
-            log_terminal("SYSTEM", "⏱ Timeout, mencoba lagi...")
-            time.sleep(5)
-        except KeyboardInterrupt:
-            log_terminal("SYSTEM", "🛑 Bot dihentikan manual.")
-            break
+    port = int(os.environ.get("PORT", 8080))
+    log("SYSTEM", f"🚀 Flask server aktif di port {port}")
+    flask_app.run(host="0.0.0.0", port=port)
