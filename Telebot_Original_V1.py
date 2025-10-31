@@ -126,7 +126,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Pesan kamu sudah dikirim ke email.")
     else:
         await update.message.reply_text("❌ Gagal mengirim email, coba lagi nanti.")
-
 # ===============================
 # FLASK SERVER
 # ===============================
@@ -143,9 +142,12 @@ def index():
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.run(application.process_update(update))
+    # Proses update di loop yang sudah aktif
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(application.process_update(update))
+    loop.close()
     return "ok", 200
-
 
 # ===============================
 # MAIN ENTRY
@@ -155,6 +157,8 @@ if __name__ == "__main__":
 
     async def setup_webhook():
         try:
+            # Initialize app di sini
+            await application.initialize()
             await bot.delete_webhook(drop_pending_updates=True)
             if webhook_url:
                 await bot.set_webhook(url=webhook_url)
@@ -164,7 +168,7 @@ if __name__ == "__main__":
         except Exception as e:
             log("SYSTEM", f"⚠️ Gagal set webhook: {e}")
 
-    asyncio.get_event_loop().run_until_complete(setup_webhook())
+    asyncio.run(setup_webhook())
 
     port = int(os.environ.get("PORT", 8080))
     log("SYSTEM", f"🚀 Flask server aktif di port {port}")
