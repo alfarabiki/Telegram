@@ -7,6 +7,7 @@ import warnings
 import threading
 import sys
 import time
+import traceback
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -34,15 +35,14 @@ EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVERS = os.getenv("EMAIL_RECEIVERS", "abriellarayasha@gmail.com").split(",")
 DOMAIN = os.getenv("RAILWAY_STATIC_URL") or os.getenv("RAILWAY_URL")
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "1") == "1"
 
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-
 if not TELEGRAM_TOKEN:
-    raise EnvironmentError("⚠️ Missing TELEGRAM_TOKEN environment variable.")
+    raise EnvironmentError("⚠️ Missing TELEGRAM_TOKEN.")
 if not EMAIL_SENDER:
     print("⚠️ EMAIL_SENDER not set.", file=sys.stderr)
 
@@ -61,14 +61,12 @@ def log_csv(path, header, row):
         writer.writerow(row)
 
 # ===============================
-# EMAIL FUNCTION (SMTP + fallback SendGrid)
+# EMAIL FUNCTION (SMTP + SendGrid fallback)
 # ===============================
 def send_email_smtp(subject, body, attachments=None, max_retries=3):
-    """
-    Mengirim email dengan SMTP Gmail (dengan retry + fallback ke SendGrid)
-    """
     attachments = attachments or []
     status = "Gagal"
+
     for attempt in range(1, max_retries + 1):
         try:
             msg = MIMEMultipart()
@@ -86,11 +84,15 @@ def send_email_smtp(subject, body, attachments=None, max_retries=3):
                         encoders.encode_base64(part)
                         part.add_header(
                             "Content-Disposition",
-                            f"attachment; filename={os.path.basename(path)}"
+                            f"attachment; filename={os.path.basename(path)}",
                         )
                         msg.attach(part)
                     except Exception as e:
                         log("EMAIL", f"⚠️ Gagal membaca attachment {path}: {e}")
+
+            # Jangan coba SMTP kalau di Railway (karena diblok)
+            if os.getenv("RAILWAY_ENVIRONMENT"):
+                raise ConnectionError("SMTP likely blocked in Railway, skip to SendGrid")
 
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
                 if SMTP_USE_TLS:
@@ -98,43 +100,49 @@ def send_email_smtp(subject, body, attachments=None, max_retries=3):
                 server.login(EMAIL_SENDER, EMAIL_PASSWORD)
                 server.send_message(msg)
 
-            log("EMAIL", f"✅ Terkirim ke {msg['To']} | Subject: {subject}")
+            log("EMAIL", f"✅ Terkirim via SMTP ke {msg['To']} | Subject: {subject}")
             status = "Terkirim"
             break
 
         except Exception as e:
             log("EMAIL", f"Attempt {attempt}/{max_retries} gagal: {e}")
+            traceback.print_exc()
+
             if attempt < max_retries:
                 time.sleep(2 ** attempt)
-            else:
-                if SENDGRID_API_KEY:
-                    try:
-                        resp = requests.post(
-                            "https://api.sendgrid.com/v3/mail/send",
-                            headers={
-                                "Authorization": f"Bearer {SENDGRID_API_KEY}",
-                                "Content-Type": "application/json",
-                            },
-                            json={
-                                "personalizations": [
-                                    {"to": [{"email": EMAIL_RECEIVERS[0]}]}
-                                ],
-                                "from": {"email": EMAIL_SENDER},
-                                "subject": subject,
-                                "content": [{"type": "text/plain", "value": body}],
-                            },
-                            timeout=10,
-                        )
-                        if resp.status_code < 300:
-                            log("EMAIL", f"✅ Fallback SendGrid berhasil ke {EMAIL_RECEIVERS}")
-                            status = "Terkirim via SendGrid"
-                        else:
-                            log("EMAIL", f"SendGrid gagal: {resp.text}")
-                    except Exception as e2:
-                        log("EMAIL", f"SendGrid error: {e2}")
-                status = f"Gagal: {e}"
+                continue
 
-    log_csv("email_log.csv", ["Waktu", "Subject", "Status"], [datetime.now(), subject, status])
+            # === Fallback ke SendGrid ===
+            if SENDGRID_API_KEY:
+                try:
+                    resp = requests.post(
+                        "https://api.sendgrid.com/v3/mail/send",
+                        headers={
+                            "Authorization": f"Bearer {SENDGRID_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "personalizations": [{"to": [{"email": EMAIL_RECEIVERS[0]}]}],
+                            "from": {"email": EMAIL_SENDER},
+                            "subject": subject,
+                            "content": [{"type": "text/plain", "value": body}],
+                        },
+                        timeout=10,
+                    )
+                    if resp.status_code < 300:
+                        log("EMAIL", f"✅ Terkirim via SendGrid ke {EMAIL_RECEIVERS}")
+                        status = "Terkirim via SendGrid"
+                    else:
+                        log("EMAIL", f"SendGrid gagal: {resp.text}")
+                        status = f"Gagal via SendGrid: {resp.status_code}"
+                except Exception as e2:
+                    log("EMAIL", f"SendGrid error: {e2}")
+                    traceback.print_exc()
+                    status = f"Gagal total: {e2}"
+
+    log_csv(
+        "email_log.csv", ["Waktu", "Subject", "Status"], [datetime.now(), subject, status]
+    )
     return status.startswith("Terkirim")
 
 async def send_email(subject, body, attachments=None):
@@ -142,7 +150,7 @@ async def send_email(subject, body, attachments=None):
     return await loop.run_in_executor(None, send_email_smtp, subject, body, attachments)
 
 # ===============================
-# TELEGRAM BOT LOGIC
+# TELEGRAM BOT + FLASK WEBHOOK
 # ===============================
 flask_app = Flask(__name__)
 bot = Bot(token=TELEGRAM_TOKEN)
@@ -164,7 +172,7 @@ def cleanup_processed():
 def waktu_now():
     bulan = [
         "Januari", "Februari", "Maret", "April", "Mei", "Juni",
-        "Juli", "Agustus", "September", "Oktober", "November", "Desember"
+        "Juli", "Agustus", "September", "Oktober", "November", "Desember",
     ]
     now = datetime.now()
     return f"{now.day} {bulan[now.month - 1]} {now.year} • {now.strftime('%H:%M')}"
@@ -195,7 +203,7 @@ async def flush_chat_buffer(chat_id):
         del per_chat_buffers[chat_id]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Halo! Bot ini aktif di Railway dan siap menerima pesan kamu!")
+    await update.message.reply_text("👋 Halo! Bot aktif dan siap menerima pesan kamu!")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.update_id
@@ -225,9 +233,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             attachments.append(path)
     except Exception as e:
         log("TELEGRAM", f"Gagal download attachment: {e}")
+        traceback.print_exc()
 
     log("TELEGRAM", f"Dari {user.first_name} | Pesan: {text}")
-    await update.message.reply_text("📥 Pesan diterima. Akan dikirim dalam 1 menit (bulk untuk lampiran).")
+    await update.message.reply_text("📥 Pesan diterima. Akan dikirim dalam 1 menit (batch).")
 
     async with buffers_lock:
         buf = per_chat_buffers.get(chat_id)
@@ -252,9 +261,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             60, lambda cid=chat_id: asyncio.create_task(flush_chat_buffer(cid))
         )
 
-# ===============================
-# FLASK WEBHOOK (dedupe fix)
-# ===============================
 GLOBAL_LOOP = None
 
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
@@ -274,12 +280,10 @@ def webhook():
         asyncio.run_coroutine_threadsafe(application.process_update(update), GLOBAL_LOOP)
     except Exception as e:
         log("SYSTEM", f"Gagal submit update ke loop: {e}")
+        traceback.print_exc()
         return str(e), 500
     return "ok", 200
 
-# ===============================
-# STARTUP
-# ===============================
 def start_background_loop(loop):
     asyncio.set_event_loop(loop)
     loop.run_forever()
