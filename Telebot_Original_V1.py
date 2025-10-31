@@ -132,44 +132,44 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 flask_app = Flask(__name__)
 bot = Bot(token=TELEGRAM_TOKEN)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+# Tambahkan handler
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
+# Gunakan loop global tunggal (tidak buat loop baru tiap request)
+loop = asyncio.get_event_loop()
+
 @flask_app.route("/", methods=["GET"])
 def index():
-    return "🤖 Bot is running on Railway.", 200
+    return "🤖 Bot is running on Railway", 200
 
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    # Proses update di loop yang sudah aktif
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(application.process_update(update))
-    loop.close()
+    # Jalankan coroutine di event loop global
+    asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
     return "ok", 200
 
 # ===============================
 # MAIN ENTRY
 # ===============================
-if __name__ == "__main__":
+async def main():
     webhook_url = f"https://{DOMAIN}/{TELEGRAM_TOKEN}" if DOMAIN else None
-
-    async def setup_webhook():
-        try:
-            # Initialize app di sini
-            await application.initialize()
-            await bot.delete_webhook(drop_pending_updates=True)
-            if webhook_url:
-                await bot.set_webhook(url=webhook_url)
-                log("SYSTEM", f"✅ Webhook set: {webhook_url}")
-            else:
-                log("SYSTEM", "⚠️ RAILWAY_STATIC_URL belum diset, webhook tidak aktif.")
-        except Exception as e:
-            log("SYSTEM", f"⚠️ Gagal set webhook: {e}")
-
-    asyncio.run(setup_webhook())
+    try:
+        await application.initialize()
+        await bot.delete_webhook(drop_pending_updates=True)
+        if webhook_url:
+            await bot.set_webhook(url=webhook_url)
+            log("SYSTEM", f"✅ Webhook set: {webhook_url}")
+        else:
+            log("SYSTEM", "⚠️ RAILWAY_STATIC_URL belum diset, webhook tidak aktif.")
+    except Exception as e:
+        log("SYSTEM", f"⚠️ Gagal set webhook: {e}")
 
     port = int(os.environ.get("PORT", 8080))
     log("SYSTEM", f"🚀 Flask server aktif di port {port}")
     flask_app.run(host="0.0.0.0", port=port)
+
+if __name__ == "__main__":
+    loop.run_until_complete(main())
