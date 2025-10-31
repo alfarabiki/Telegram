@@ -30,7 +30,6 @@ EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_RECEIVERS = os.getenv("EMAIL_RECEIVERS", "abriellarayasha@gmail.com").split(",")
 DOMAIN = os.getenv("RAILWAY_STATIC_URL") or os.getenv("RAILWAY_URL")
-CHAT_ID_ADMIN = os.getenv("CHAT_ID_ADMIN")  # Tambahkan di Railway
 
 if not TELEGRAM_TOKEN or not EMAIL_SENDER or not EMAIL_PASSWORD:
     raise EnvironmentError("⚠️ Missing environment variables. Please set TELEGRAM_TOKEN, EMAIL_SENDER, and EMAIL_PASSWORD.")
@@ -143,16 +142,8 @@ def index():
 
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
-    try:
-        update = Update.de_json(request.get_json(force=True), bot)
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.create_task(application.process_update(update))
-    except Exception as e:
-        log("WEBHOOK", f"Error: {e}")
+    update = Update.de_json(request.get_json(force=True), bot)
+    asyncio.get_event_loop().create_task(application.process_update(update))
     return "ok", 200
 
 # ===============================
@@ -169,20 +160,10 @@ if __name__ == "__main__":
                 log("SYSTEM", f"✅ Webhook set: {webhook_url}")
             else:
                 log("SYSTEM", "⚠️ RAILWAY_STATIC_URL belum diset, webhook tidak aktif.")
-
-            # Kirim pesan ke admin setelah aktif
-            if CHAT_ID_ADMIN:
-                await bot.send_message(
-                    chat_id=int(CHAT_ID_ADMIN),
-                    text="🤖 Bot baru saja aktif!\n\nHallo apa yang mau kamu share tentang aku?!"
-                )
-                log("SYSTEM", f"📩 Pesan startup dikirim ke chat_id: {CHAT_ID_ADMIN}")
-            else:
-                log("SYSTEM", "⚠️ CHAT_ID_ADMIN belum diset, tidak kirim pesan startup.")
         except Exception as e:
             log("SYSTEM", f"⚠️ Gagal set webhook: {e}")
 
-    asyncio.run(setup_webhook())
+    asyncio.get_event_loop().run_until_complete(setup_webhook())
 
     port = int(os.environ.get("PORT", 8080))
     log("SYSTEM", f"🚀 Flask server aktif di port {port}")
