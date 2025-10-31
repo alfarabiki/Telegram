@@ -22,7 +22,7 @@ from telegram.ext import (
     filters,
 )
 from flask import Flask, request
-import requests  # ✅ FIXED (untuk fallback SendGrid)
+import requests
 
 warnings.filterwarnings("ignore", category=UserWarning, module="apscheduler")
 
@@ -64,24 +64,33 @@ def log_csv(path, header, row):
 # EMAIL FUNCTION (SMTP + fallback SendGrid)
 # ===============================
 def send_email_smtp(subject, body, attachments=None, max_retries=3):
+    """
+    Mengirim email dengan SMTP Gmail (dengan retry + fallback ke SendGrid)
+    """
     attachments = attachments or []
+    status = "Gagal"
     for attempt in range(1, max_retries + 1):
         try:
             msg = MIMEMultipart()
             msg["Subject"] = Header(subject, "utf-8")
             msg["From"] = EMAIL_SENDER
             msg["To"] = ", ".join(EMAIL_RECEIVERS)
-            msg.attach(MIMEText(body, "plain"))
+            msg.attach(MIMEText(body, "plain", "utf-8"))
 
             for path in attachments:
                 if os.path.isfile(path):
-                    part = MIMEBase("application", "octet-stream")
-                    with open(path, "rb") as f:
-                        part.set_payload(f.read())
-                    encoders.encode_base64(part)
-                    part.add_header("Content-Disposition",
-                                    f"attachment; filename={os.path.basename(path)}")
-                    msg.attach(part)
+                    try:
+                        part = MIMEBase("application", "octet-stream")
+                        with open(path, "rb") as f:
+                            part.set_payload(f.read())
+                        encoders.encode_base64(part)
+                        part.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename={os.path.basename(path)}"
+                        )
+                        msg.attach(part)
+                    except Exception as e:
+                        log("EMAIL", f"⚠️ Gagal membaca attachment {path}: {e}")
 
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
                 if SMTP_USE_TLS:
@@ -89,41 +98,44 @@ def send_email_smtp(subject, body, attachments=None, max_retries=3):
                 server.login(EMAIL_SENDER, EMAIL_PASSWORD)
                 server.send_message(msg)
 
-            log("EMAIL", f"Terkirim ke {msg['To']} | Subject: {subject}")
-            return True
+            log("EMAIL", f"✅ Terkirim ke {msg['To']} | Subject: {subject}")
+            status = "Terkirim"
+            break
 
         except Exception as e:
             log("EMAIL", f"Attempt {attempt}/{max_retries} gagal: {e}")
             if attempt < max_retries:
                 time.sleep(2 ** attempt)
             else:
-                # ✅ FIXED: fallback ke SendGrid
                 if SENDGRID_API_KEY:
                     try:
                         resp = requests.post(
                             "https://api.sendgrid.com/v3/mail/send",
                             headers={
                                 "Authorization": f"Bearer {SENDGRID_API_KEY}",
-                                "Content-Type": "application/json"
+                                "Content-Type": "application/json",
                             },
                             json={
-                                "personalizations": [{
-                                    "to": [{"email": EMAIL_RECEIVERS[0]}]
-                                }],
+                                "personalizations": [
+                                    {"to": [{"email": EMAIL_RECEIVERS[0]}]}
+                                ],
                                 "from": {"email": EMAIL_SENDER},
                                 "subject": subject,
                                 "content": [{"type": "text/plain", "value": body}],
                             },
-                            timeout=10
+                            timeout=10,
                         )
                         if resp.status_code < 300:
-                            log("EMAIL", f"SendGrid fallback berhasil: {EMAIL_RECEIVERS}")
-                            return True
+                            log("EMAIL", f"✅ Fallback SendGrid berhasil ke {EMAIL_RECEIVERS}")
+                            status = "Terkirim via SendGrid"
                         else:
                             log("EMAIL", f"SendGrid gagal: {resp.text}")
                     except Exception as e2:
                         log("EMAIL", f"SendGrid error: {e2}")
-                return False
+                status = f"Gagal: {e}"
+
+    log_csv("email_log.csv", ["Waktu", "Subject", "Status"], [datetime.now(), subject, status])
+    return status.startswith("Terkirim")
 
 async def send_email(subject, body, attachments=None):
     loop = asyncio.get_running_loop()
@@ -145,15 +157,17 @@ buffers_lock = asyncio.Lock()
 def cleanup_processed():
     now = time.time()
     with processed_lock:
-        to_del = [k for k, v in PROCESSED_UPDATES.items() if now - v > PROCESSED_TTL]
-        for k in to_del:
+        expired = [k for k, v in PROCESSED_UPDATES.items() if now - v > PROCESSED_TTL]
+        for k in expired:
             del PROCESSED_UPDATES[k]
 
 def waktu_now():
-    bulan = ["Januari","Februari","Maret","April","Mei","Juni",
-             "Juli","Agustus","September","Oktober","November","Desember"]
+    bulan = [
+        "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+        "Juli", "Agustus", "September", "Oktober", "November", "Desember"
+    ]
     now = datetime.now()
-    return f"{now.day} {bulan[now.month-1]} {now.year} • {now.strftime('%H:%M')}"
+    return f"{now.day} {bulan[now.month - 1]} {now.year} • {now.strftime('%H:%M')}"
 
 async def flush_chat_buffer(chat_id):
     async with buffers_lock:
@@ -164,9 +178,12 @@ async def flush_chat_buffer(chat_id):
         attachments = buf.get("attachments", [])
         username = buf.get("username", "-")
         first_name = buf.get("first_name", "-")
+
         subj = f"From Baba & Ibun – {waktu_now()} (chat {chat_id})"
         body = f"Dari: {first_name} (@{username})\n\nPesan gabungan:\n\n" + "\n\n---\n\n".join(texts or ["(kosong)"])
+
         success = await send_email(subj, body, attachments)
+
         try:
             if success:
                 await bot.send_message(chat_id, "✅ Pesan & lampiran berhasil dikirim ke email.")
@@ -174,6 +191,7 @@ async def flush_chat_buffer(chat_id):
                 await bot.send_message(chat_id, "❌ Gagal mengirim email. Coba lagi nanti.")
         except Exception as e:
             log("TELEGRAM", f"Gagal kirim notifikasi: {e}")
+
         del per_chat_buffers[chat_id]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -230,7 +248,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buf["timer_handle"].cancel()
 
         loop = asyncio.get_running_loop()
-        buf["timer_handle"] = loop.call_later(60, lambda cid=chat_id: asyncio.create_task(flush_chat_buffer(cid)))
+        buf["timer_handle"] = loop.call_later(
+            60, lambda cid=chat_id: asyncio.create_task(flush_chat_buffer(cid))
+        )
 
 # ===============================
 # FLASK WEBHOOK (dedupe fix)
@@ -244,7 +264,6 @@ def webhook():
     update = Update.de_json(update_json, bot)
     update_id = update.update_id
 
-    # ✅ FIXED: dedup di sini juga
     with processed_lock:
         if update_id in PROCESSED_UPDATES:
             log("SYSTEM", f"Duplicate webhook {update_id}, abaikan.")
