@@ -126,6 +126,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Pesan kamu sudah dikirim ke email.")
     else:
         await update.message.reply_text("❌ Gagal mengirim email, coba lagi nanti.")
+
 # ===============================
 # FLASK SERVER
 # ===============================
@@ -137,7 +138,6 @@ application = Application.builder().token(TELEGRAM_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
 
-# Gunakan loop global tunggal (tidak buat loop baru tiap request)
 loop = asyncio.get_event_loop()
 
 @flask_app.route("/", methods=["GET"])
@@ -147,7 +147,6 @@ def index():
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
-    # Jalankan coroutine di event loop global
     asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
     return "ok", 200
 
@@ -158,6 +157,7 @@ async def main():
     webhook_url = f"https://{DOMAIN}/{TELEGRAM_TOKEN}" if DOMAIN else None
     try:
         await application.initialize()
+        await application.start()  # ✅ penting: mengaktifkan handler & event loop internal
         await bot.delete_webhook(drop_pending_updates=True)
         if webhook_url:
             await bot.set_webhook(url=webhook_url)
