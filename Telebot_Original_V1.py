@@ -4,6 +4,8 @@ import smtplib
 import asyncio
 import csv
 import warnings
+import threading
+import sys
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -32,7 +34,9 @@ EMAIL_RECEIVERS = os.getenv("EMAIL_RECEIVERS", "abriellarayasha@gmail.com").spli
 DOMAIN = os.getenv("RAILWAY_STATIC_URL") or os.getenv("RAILWAY_URL")
 
 if not TELEGRAM_TOKEN or not EMAIL_SENDER or not EMAIL_PASSWORD:
-    raise EnvironmentError("⚠️ Missing environment variables. Please set TELEGRAM_TOKEN, EMAIL_SENDER, and EMAIL_PASSWORD.")
+    raise EnvironmentError(
+        "⚠️ Missing environment variables. Please set TELEGRAM_TOKEN, EMAIL_SENDER, and EMAIL_PASSWORD."
+    )
 
 # ===============================
 # LOGGING
@@ -65,7 +69,10 @@ def send_email(subject, body, attachments=None):
             with open(path, "rb") as f:
                 part.set_payload(f.read())
             encoders.encode_base64(part)
-            part.add_header("Content-Disposition", f"attachment; filename={os.path.basename(path)}")
+            part.add_header(
+                "Content-Disposition",
+                f"attachment; filename={os.path.basename(path)}",
+            )
             msg.attach(part)
 
     try:
@@ -74,21 +81,49 @@ def send_email(subject, body, attachments=None):
             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
             server.send_message(msg)
         log("EMAIL", f"Terkirim ke {msg['To']} | Subject: {subject}")
-        log_csv("email_log.csv", ["timestamp", "to", "subject", "status"],
-                [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg["To"], subject, "Terkirim"])
+        log_csv(
+            "email_log.csv",
+            ["timestamp", "to", "subject", "status"],
+            [
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                msg["To"],
+                subject,
+                "Terkirim",
+            ],
+        )
         return True
     except Exception as e:
         log("EMAIL", f"Gagal kirim: {e}")
-        log_csv("email_log.csv", ["timestamp", "to", "subject", "status"],
-                [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg["To"], subject, f"Gagal: {e}"])
+        log_csv(
+            "email_log.csv",
+            ["timestamp", "to", "subject", "status"],
+            [
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                msg["To"],
+                subject,
+                f"Gagal: {e}",
+            ],
+        )
         return False
 
 # ===============================
-# HANDLERS
+# TELEGRAM HANDLERS
 # ===============================
 def waktu_now():
-    bulan = ["Januari", "Februari", "Maret", "April", "Mei", "Juni",
-             "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
+    bulan = [
+        "Januari",
+        "Februari",
+        "Maret",
+        "April",
+        "Mei",
+        "Juni",
+        "Juli",
+        "Agustus",
+        "September",
+        "Oktober",
+        "November",
+        "Desember",
+    ]
     now = datetime.now()
     return f"{now.day} {bulan[now.month-1]} {now.year} • {now.strftime('%H:%M')}"
 
@@ -114,10 +149,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         attachments.append(path)
 
     log("TELEGRAM", f"Dari {user.first_name} | Pesan: {text}")
-    log_csv("message_log.csv",
-            ["timestamp", "user", "username", "message"],
-            [datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-             user.first_name, user.username or "-", text])
+    log_csv(
+        "message_log.csv",
+        ["timestamp", "user", "username", "message"],
+        [
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            user.first_name,
+            user.username or "-",
+            text,
+        ],
+    )
 
     subject = f"From Baba & Ibun – {waktu_now()}"
     body = f"Dari: {user.first_name} (@{user.username or '-'})\n\nPesan:\n{text}"
@@ -128,17 +169,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Gagal mengirim email, coba lagi nanti.")
 
 # ===============================
-# FLASK SERVER
+# FLASK SERVER + TELEGRAM APP
 # ===============================
 flask_app = Flask(__name__)
 bot = Bot(token=TELEGRAM_TOKEN)
 application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# Tambahkan handler
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
-
-loop = asyncio.get_event_loop()
 
 @flask_app.route("/", methods=["GET"])
 def index():
@@ -146,30 +184,42 @@ def index():
 
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
+    print("📩 Webhook hit! Ada update masuk.", file=sys.stderr)
     update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.run_coroutine_threadsafe(application.process_update(update), loop)
+    asyncio.run_coroutine_threadsafe(
+        application.process_update(update),
+        asyncio.get_event_loop(),
+    )
     return "ok", 200
 
 # ===============================
-# MAIN ENTRY
+# MAIN ENTRY POINT
 # ===============================
-async def main():
+async def run_bot():
     webhook_url = f"https://{DOMAIN}/{TELEGRAM_TOKEN}" if DOMAIN else None
     try:
         await application.initialize()
-        await application.start()  # ✅ penting: mengaktifkan handler & event loop internal
+        await application.start()
         await bot.delete_webhook(drop_pending_updates=True)
         if webhook_url:
             await bot.set_webhook(url=webhook_url)
             log("SYSTEM", f"✅ Webhook set: {webhook_url}")
         else:
-            log("SYSTEM", "⚠️ RAILWAY_STATIC_URL belum diset, webhook tidak aktif.")
+            log("SYSTEM", "⚠️ DOMAIN (RAILWAY_STATIC_URL) belum diset.")
     except Exception as e:
         log("SYSTEM", f"⚠️ Gagal set webhook: {e}")
 
+async def main():
+    await run_bot()
+
     port = int(os.environ.get("PORT", 8080))
-    log("SYSTEM", f"🚀 Flask server aktif di port {port}")
-    flask_app.run(host="0.0.0.0", port=port)
+
+    def run_flask():
+        log("SYSTEM", f"🚀 Flask server aktif di port {port}")
+        flask_app.run(host="0.0.0.0", port=port, debug=False)
+
+    thread = threading.Thread(target=run_flask)
+    thread.start()
 
 if __name__ == "__main__":
-    loop.run_until_complete(main())
+    asyncio.run(main())
