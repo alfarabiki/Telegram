@@ -8,7 +8,7 @@ import threading
 import sys
 import time
 import traceback
-import requests  # ✅ penting untuk SendGrid fallback
+import requests
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -94,7 +94,7 @@ def send_email_smtp(subject, body, attachments=None, max_retries=3):
             if os.getenv("RAILWAY_ENVIRONMENT"):
                 raise ConnectionError("SMTP kemungkinan diblokir di Railway")
 
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=15) as server:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
                 if SMTP_USE_TLS:
                     server.starttls()
                 server.login(EMAIL_SENDER, EMAIL_PASSWORD)
@@ -198,7 +198,7 @@ async def flush_chat_buffer(chat_id):
             else:
                 await bot.send_message(chat_id, "❌ Gagal kirim email.")
         except Exception as e:
-            log("TELEGRAM", f"Gagal kirim notif: {e}")
+            log("TELEGRAM", f"Gagal kirim notif ke Telegram: {e}")
 
         del per_chat_buffers[chat_id]
 
@@ -278,7 +278,7 @@ GLOBAL_LOOP = None
 
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
-    log("SYSTEM", "📩 Webhook hit! Ada update masuk.")
+    log("SYSTEM", "📩 Webhook hit! Ada Pesan masuk!")
     try:
         update_json = request.get_json(force=True)
         update = Update.de_json(update_json, bot)
@@ -290,10 +290,12 @@ def webhook():
             PROCESSED_UPDATES[update_id] = time.time()
 
         if GLOBAL_LOOP is None or not GLOBAL_LOOP.is_running():
+            log("SYSTEM", "⚠️ GLOBAL_LOOP belum jalan, retry sebentar...")
             time.sleep(1)
 
         fut = asyncio.run_coroutine_threadsafe(application.process_update(update), GLOBAL_LOOP)
-        log("SYSTEM", f"✅ Update {update_id} dikirim ke event loop.")
+        fut.result(timeout=15)  # tunggu 15 detik agar pasti dijalankan
+        log("SYSTEM", f"✅ Update {update_id} berhasil diproses.")
         return "ok", 200
 
     except Exception as e:
@@ -306,7 +308,12 @@ def webhook():
 # ===============================
 def start_background_loop(loop):
     asyncio.set_event_loop(loop)
-    loop.run_forever()
+    loop.run_until_complete(heartbeat_loop())
+
+async def heartbeat_loop():
+    """Menjaga event loop agar tetap aktif."""
+    while True:
+        await asyncio.sleep(5)
 
 async def init_app():
     await application.initialize()
