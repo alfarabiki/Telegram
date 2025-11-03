@@ -23,7 +23,6 @@ from telegram.ext import (
     filters,
 )
 from flask import Flask, request
-import requests
 
 warnings.filterwarnings("ignore", category=UserWarning, module="apscheduler")
 
@@ -61,7 +60,7 @@ def log_csv(path, header, row):
         writer.writerow(row)
 
 # ===============================
-# EMAIL FUNCTION (SMTP + SendGrid fallback)
+# EMAIL FUNCTION
 # ===============================
 def send_email_smtp(subject, body, attachments=None, max_retries=3):
     attachments = attachments or []
@@ -90,7 +89,6 @@ def send_email_smtp(subject, body, attachments=None, max_retries=3):
                     except Exception as e:
                         log("EMAIL", f"⚠️ Gagal membaca attachment {path}: {e}")
 
-            # Jangan coba SMTP kalau di Railway (karena diblok)
             if os.getenv("RAILWAY_ENVIRONMENT"):
                 raise ConnectionError("SMTP likely blocked in Railway, skip to SendGrid")
 
@@ -171,8 +169,8 @@ def cleanup_processed():
 
 def waktu_now():
     bulan = [
-        "Januari", "Februari", "Maret", "April", "Mei", "Juni",
-        "Juli", "Agustus", "September", "Oktober", "November", "Desember",
+        "Januari","Februari","Maret","April","Mei","Juni",
+        "Juli","Agustus","September","Oktober","November","Desember"
     ]
     now = datetime.now()
     return f"{now.day} {bulan[now.month - 1]} {now.year} • {now.strftime('%H:%M')}"
@@ -266,34 +264,29 @@ GLOBAL_LOOP = None
 @flask_app.route(f"/{TELEGRAM_TOKEN}", methods=["POST"])
 def webhook():
     log("SYSTEM", "📩 Webhook hit! Ada update masuk.")
-    update_json = request.get_json(force=True)
-    update = Update.de_json(update_json, bot)
-    update_id = update.update_id
-
-    with processed_lock:
-        if update_id in PROCESSED_UPDATES:
-            log("SYSTEM", f"Duplicate webhook {update_id}, abaikan.")
-            return "duplicate", 200
-        PROCESSED_UPDATES[update_id] = time.time()
-
-    # 🔧 Tambahkan ini
-    if GLOBAL_LOOP is None or not GLOBAL_LOOP.is_running():
-        log("SYSTEM", "⚠️ Event loop belum aktif, tunda 1 detik.")
-        time.sleep(1)
-
     try:
+        update_json = request.get_json(force=True)
+        update = Update.de_json(update_json, bot)
+        update_id = update.update_id
+
+        with processed_lock:
+            if update_id in PROCESSED_UPDATES:
+                log("SYSTEM", f"Duplicate webhook {update_id}, abaikan.")
+                return "duplicate", 200
+            PROCESSED_UPDATES[update_id] = time.time()
+
+        if GLOBAL_LOOP is None or not GLOBAL_LOOP.is_running():
+            log("SYSTEM", "⚠️ Event loop belum aktif, tunda 1 detik.")
+            time.sleep(1)
+
         fut = asyncio.run_coroutine_threadsafe(application.process_update(update), GLOBAL_LOOP)
-        # Jangan tunggu result, cukup fire and forget
-        # Telegram webhook cukup return "ok" agar tidak retry terus
         log("SYSTEM", f"✅ Update {update_id} dikirim ke event loop.")
+        return "ok", 200
+
     except Exception as e:
         log("SYSTEM", f"❌ Gagal submit update ke loop: {e}")
-    traceback.print_exc()
-    return str(e), 500
-
-    return "ok", 200
-
-
+        traceback.print_exc()
+        return str(e), 500
 
 def start_background_loop(loop):
     asyncio.set_event_loop(loop)
@@ -312,18 +305,15 @@ def main():
     global GLOBAL_LOOP
     GLOBAL_LOOP = asyncio.new_event_loop()
 
-    # Jalankan loop di background
     t = threading.Thread(target=start_background_loop, args=(GLOBAL_LOOP,), daemon=True)
     t.start()
 
-    # Tunggu sampai loop benar-benar hidup
-    for i in range(20):  # tunggu maksimal 10 detik
+    for i in range(20):
         if GLOBAL_LOOP.is_running():
             break
         log("SYSTEM", f"⏳ Menunggu loop aktif... ({i+1})")
         time.sleep(0.5)
 
-    # Jalankan init_app tanpa timeout ketat
     try:
         fut = asyncio.run_coroutine_threadsafe(init_app(), GLOBAL_LOOP)
         fut.result(timeout=30)
@@ -334,8 +324,8 @@ def main():
 
     port = int(os.environ.get("PORT", 8080))
     log("SYSTEM", f"🚀 Flask listening di port {port}")
+    log("BOT", "🤖 BOT RUNNING — siap menerima pesan dan webhook!")
     flask_app.run(host="0.0.0.0", port=port, debug=False)
-
 
 if __name__ == "__main__":
     application.add_handler(CommandHandler("start", start))
