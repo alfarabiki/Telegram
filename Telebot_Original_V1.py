@@ -283,13 +283,16 @@ def webhook():
 
     try:
         fut = asyncio.run_coroutine_threadsafe(application.process_update(update), GLOBAL_LOOP)
-        fut.result(timeout=10)  # tunggu sampai benar-benar dijalankan
+        # Jangan tunggu result, cukup fire and forget
+        # Telegram webhook cukup return "ok" agar tidak retry terus
+        log("SYSTEM", f"✅ Update {update_id} dikirim ke event loop.")
     except Exception as e:
-        log("SYSTEM", f"Gagal submit update ke loop: {e}")
-        traceback.print_exc()
-        return str(e), 500
+        log("SYSTEM", f"❌ Gagal submit update ke loop: {e}")
+    traceback.print_exc()
+    return str(e), 500
 
     return "ok", 200
+
 
 
 def start_background_loop(loop):
