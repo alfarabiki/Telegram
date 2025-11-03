@@ -289,19 +289,20 @@ def webhook():
                 return "duplicate", 200
             PROCESSED_UPDATES[update_id] = time.time()
 
-        if GLOBAL_LOOP is None or not GLOBAL_LOOP.is_running():
-            log("SYSTEM", "⚠️ GLOBAL_LOOP belum jalan, retry sebentar...")
-            time.sleep(1)
+        # Jalankan async update tanpa blocking Flask thread
+        if GLOBAL_LOOP and GLOBAL_LOOP.is_running():
+            asyncio.run_coroutine_threadsafe(application.process_update(update), GLOBAL_LOOP)
+            log("SYSTEM", f"✅ Update {update_id} dikirim ke event loop (non-block).")
+        else:
+            log("SYSTEM", "⚠️ Event loop belum siap, update dilewati sementara.")
 
-        fut = asyncio.run_coroutine_threadsafe(application.process_update(update), GLOBAL_LOOP)
-        fut.result(timeout=15)  # tunggu 15 detik agar pasti dijalankan
-        log("SYSTEM", f"✅ Update {update_id} berhasil diproses.")
         return "ok", 200
 
     except Exception as e:
         log("SYSTEM", f"❌ Webhook error: {e}")
         traceback.print_exc()
         return str(e), 500
+
 
 # ===============================
 # MAIN
