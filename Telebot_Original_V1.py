@@ -276,13 +276,21 @@ def webhook():
             return "duplicate", 200
         PROCESSED_UPDATES[update_id] = time.time()
 
+    # 🔧 Tambahkan ini
+    if GLOBAL_LOOP is None or not GLOBAL_LOOP.is_running():
+        log("SYSTEM", "⚠️ Event loop belum aktif, tunda 1 detik.")
+        time.sleep(1)
+
     try:
-        asyncio.run_coroutine_threadsafe(application.process_update(update), GLOBAL_LOOP)
+        fut = asyncio.run_coroutine_threadsafe(application.process_update(update), GLOBAL_LOOP)
+        fut.result(timeout=10)  # tunggu sampai benar-benar dijalankan
     except Exception as e:
         log("SYSTEM", f"Gagal submit update ke loop: {e}")
         traceback.print_exc()
         return str(e), 500
+
     return "ok", 200
+
 
 def start_background_loop(loop):
     asyncio.set_event_loop(loop)
