@@ -308,10 +308,31 @@ async def init_app():
 def main():
     global GLOBAL_LOOP
     GLOBAL_LOOP = asyncio.new_event_loop()
-    threading.Thread(target=start_background_loop, args=(GLOBAL_LOOP,), daemon=True).start()
-    asyncio.run_coroutine_threadsafe(init_app(), GLOBAL_LOOP).result(timeout=10)
+
+    # Jalankan loop di background
+    t = threading.Thread(target=start_background_loop, args=(GLOBAL_LOOP,), daemon=True)
+    t.start()
+
+    # Tunggu sampai loop benar-benar hidup
+    for i in range(20):  # tunggu maksimal 10 detik
+        if GLOBAL_LOOP.is_running():
+            break
+        log("SYSTEM", f"⏳ Menunggu loop aktif... ({i+1})")
+        time.sleep(0.5)
+
+    # Jalankan init_app tanpa timeout ketat
+    try:
+        fut = asyncio.run_coroutine_threadsafe(init_app(), GLOBAL_LOOP)
+        fut.result(timeout=30)
+        log("SYSTEM", "✅ Telegram app initialized dan webhook sudah diset.")
+    except Exception as e:
+        log("SYSTEM", f"❌ Gagal init Telegram: {e}")
+        traceback.print_exc()
+
     port = int(os.environ.get("PORT", 8080))
+    log("SYSTEM", f"🚀 Flask listening di port {port}")
     flask_app.run(host="0.0.0.0", port=port, debug=False)
+
 
 if __name__ == "__main__":
     application.add_handler(CommandHandler("start", start))
